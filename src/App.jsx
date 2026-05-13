@@ -1,9 +1,16 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 
-// ── OSMD is imported directly from npm — no dynamic loader needed ──────────
+// ── OSMD loader ────────────────────────────────────────────────────────────
 function useOSMD() {
-  return true; // always ready
+  const [ready, setReady] = useState(!!window.opensheetmusicdisplay);
+  useEffect(() => {
+    if (window.opensheetmusicdisplay) { setReady(true); return; }
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.8.9/build/opensheetmusicdisplay.min.js";
+    s.onload = () => setReady(true);
+    document.head.appendChild(s);
+  }, []);
+  return ready;
 }
 
 // ── OSMD Score Viewer ──────────────────────────────────────────────────────
@@ -21,7 +28,8 @@ function OsmdViewer({ xmlContent, currentMeasure }) {
     (async () => {
       try {
         ref.current.innerHTML = "";
-        const osmd = new OpenSheetMusicDisplay(ref.current, {
+        const OSMD = window.opensheetmusicdisplay.OpenSheetMusicDisplay;
+        const osmd = new OSMD(ref.current, {
           autoResize: true, backend: "svg",
           drawTitle: true, drawComposer: true, drawPartNames: true,
           drawMeasureNumbers: true, followCursor: true,
@@ -443,174 +451,220 @@ export default function App() {
 
   useEffect(() => () => stopAll(), []);
 
-  // ── Derived ───────────────────────────────────────────────────────────────
+  // ── Responsive breakpoint ─────────────────────────────────────────────────
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 640);
+  const [showSidebar, setShowSidebar] = useState(false);
+  useEffect(() => {
+    const fn = () => {
+      const mobile = window.innerWidth < 640;
+      setIsMobile(mobile);
+      if (!mobile) setShowSidebar(false);
+    };
+    window.addEventListener("resize", fn);
+    return () => window.removeEventListener("resize", fn);
+  }, []);
+
+  // ── Derived ────────────────────────────────────────────────────────────────
   const progressPct = duration>0 ? Math.min((currentTime/duration)*100,100) : 0;
   const activeCount = activeSong?.tracks.filter(t=> soloTrack ? soloTrack===t.id : !mutedTracks[t.id]).length ?? 0;
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Shared styles ──────────────────────────────────────────────────────────
+  const btn = (extra={}) => ({
+    border:"1px solid #d6d3d1", borderRadius:8, background:"#fff",
+    cursor:"pointer", fontFamily:"Georgia,serif", fontSize:13,
+    padding:"10px 16px", color:"#44403c", ...extra,
+  });
+
+  // ── Song list (reused in sidebar + mobile drawer) ──────────────────────────
+  const SongList = () => (
+    <>
+      <div style={{padding:"0 14px 8px",fontSize:10,fontWeight:700,color:"#a8a29e",letterSpacing:".12em",textTransform:"uppercase"}}>Songs</div>
+      {songs.length===0 && <div style={{padding:"10px 14px",fontSize:13,color:"#a8a29e",fontStyle:"italic"}}>No songs yet</div>}
+      {songs.map(s=>(
+        <div key={s.id} style={{display:"flex",alignItems:"center",
+          background:activeSongId===s.id?"#fef3c7":"transparent",
+          borderLeft:activeSongId===s.id?"3px solid #f59e0b":"3px solid transparent"}}>
+          <button onClick={()=>{selectSong(s.id);setShowSidebar(false);}} style={{
+            flex:1,textAlign:"left",padding:"11px 14px",border:"none",background:"transparent",
+            cursor:"pointer",fontFamily:"Georgia,serif",minWidth:0,
+          }}>
+            <div style={{fontSize:14,fontWeight:activeSongId===s.id?700:500,
+              color:activeSongId===s.id?"#92400e":"#44403c",
+              whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.title}</div>
+            <div style={{fontSize:11,color:"#a8a29e",marginTop:2}}>
+              {s.tracks.length} track{s.tracks.length!==1?"s":""}{s.scoreFile?" · 🎼":""}
+            </div>
+          </button>
+          <button onClick={()=>deleteSong(s.id)}
+            style={{padding:"12px",border:"none",background:"transparent",cursor:"pointer",color:"#d6d3d1",fontSize:18}}>×</button>
+        </div>
+      ))}
+      {addingSong ? (
+        <div style={{padding:"10px 14px"}}>
+          <input autoFocus value={newTitle} onChange={e=>setNewTitle(e.target.value)}
+            onKeyDown={e=>{if(e.key==="Enter")createSong();if(e.key==="Escape")setAddingSong(false);}}
+            placeholder="Song title…"
+            style={{width:"100%",padding:"10px",border:"1px solid #d6d3d1",borderRadius:8,
+              fontSize:14,fontFamily:"Georgia,serif",marginBottom:8,outline:"none"}}/>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={createSong} style={{flex:1,padding:"9px",border:"none",borderRadius:8,
+              background:"#f59e0b",color:"#fff",fontSize:13,cursor:"pointer",fontFamily:"Georgia,serif",fontWeight:600}}>Add</button>
+            <button onClick={()=>setAddingSong(false)} style={{flex:1,padding:"9px",border:"1px solid #d6d3d1",
+              borderRadius:8,background:"#fff",color:"#78716c",fontSize:13,cursor:"pointer",fontFamily:"Georgia,serif"}}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={()=>setAddingSong(true)} style={{
+          display:"block",width:"calc(100% - 28px)",margin:"8px 14px",padding:"10px",
+          border:"1px dashed #d6d3d1",borderRadius:8,background:"transparent",
+          cursor:"pointer",fontSize:13,color:"#78716c",fontFamily:"Georgia,serif",
+        }}>+ New Song</button>
+      )}
+    </>
+  );
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div style={{fontFamily:"Georgia,serif",background:"#fafaf8",minHeight:"100vh",color:"#1c1917"}}>
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
         *{box-sizing:border-box}
+        input,button,select{-webkit-tap-highlight-color:transparent}
       `}</style>
 
-      {/* Header */}
-      <div style={{background:"#1c1917",padding:"13px 22px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      {/* ── Header ── */}
+      <div style={{background:"#1c1917",padding:"13px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <span style={{fontSize:24,color:"#fafaf8"}}>𝄞</span>
+          {isMobile && (
+            <button onClick={()=>setShowSidebar(v=>!v)} style={{
+              background:"transparent",border:"none",color:"#fafaf8",fontSize:20,
+              cursor:"pointer",padding:"0 8px 0 0",lineHeight:1,
+            }}>☰</button>
+          )}
+          <span style={{fontSize:22,color:"#fafaf8"}}>𝄞</span>
           <div>
-            <div style={{fontSize:16,fontWeight:700,color:"#fafaf8",letterSpacing:".02em"}}>ScoreView</div>
-            <div style={{fontSize:9,color:"#a8a29e",letterSpacing:".12em",textTransform:"uppercase"}}>Score + Multi-Track Player</div>
+            <div style={{fontSize:15,fontWeight:700,color:"#fafaf8",letterSpacing:".02em"}}>ScoreView</div>
+            {!isMobile && <div style={{fontSize:9,color:"#a8a29e",letterSpacing:".12em",textTransform:"uppercase"}}>Score + Multi-Track Player</div>}
           </div>
         </div>
-        <span style={{fontSize:11,color:"#78716c"}}>{songs.length} song{songs.length!==1?"s":""}</span>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {activeSong && isPlaying && (
+            <div style={{display:"flex",gap:4}}>
+              {activeSong.tracks.map(t=>{
+                const dim=soloTrack?soloTrack!==t.id:!!mutedTracks[t.id];
+                return <div key={t.id} style={{width:6,height:6,borderRadius:"50%",
+                  background:dim?"#555":t.color,boxShadow:!dim?`0 0 4px ${t.color}`:"none"}}/>;
+              })}
+            </div>
+          )}
+          <span style={{fontSize:11,color:"#78716c"}}>{songs.length} song{songs.length!==1?"s":""}</span>
+        </div>
       </div>
 
-      <div style={{display:"flex",minHeight:"calc(100vh - 54px)"}}>
-
-        {/* ── Sidebar ─────────────────────────────────────────────────────── */}
-        <div style={{width:215,background:"#fff",borderRight:"1px solid #e7e5e4",padding:"13px 0",flexShrink:0,overflowY:"auto"}}>
-          <div style={{padding:"0 13px 8px",fontSize:10,fontWeight:700,color:"#a8a29e",letterSpacing:".12em",textTransform:"uppercase"}}>Songs</div>
-
-          {songs.length===0 && (
-            <div style={{padding:"12px 13px",fontSize:12,color:"#a8a29e",fontStyle:"italic"}}>No songs yet</div>
-          )}
-
-          {songs.map(s=>(
-            <div key={s.id} style={{
-              display:"flex",alignItems:"center",
-              background:activeSongId===s.id?"#fef3c7":"transparent",
-              borderLeft:activeSongId===s.id?"3px solid #f59e0b":"3px solid transparent",
-            }}>
-              <button onClick={()=>selectSong(s.id)} style={{
-                flex:1,textAlign:"left",padding:"9px 12px",border:"none",background:"transparent",
-                cursor:"pointer",fontFamily:"Georgia,serif",minWidth:0,
-              }}>
-                <div style={{fontSize:13,fontWeight:activeSongId===s.id?700:500,
-                  color:activeSongId===s.id?"#92400e":"#44403c",
-                  whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
-                  {s.title}
-                </div>
-                <div style={{fontSize:10,color:"#a8a29e",marginTop:2}}>
-                  {s.tracks.length} track{s.tracks.length!==1?"s":""}
-                  {s.scoreFile?" · 🎼":""}
-                </div>
-              </button>
-              <button onClick={()=>deleteSong(s.id)}
-                style={{padding:"0 10px",border:"none",background:"transparent",cursor:"pointer",color:"#d6d3d1",fontSize:16,flexShrink:0}}>×</button>
+      {/* ── Mobile sidebar overlay ── */}
+      {isMobile && showSidebar && (
+        <>
+          <div onClick={()=>setShowSidebar(false)}
+            style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:200}}/>
+          <div style={{position:"fixed",top:0,left:0,bottom:0,width:280,background:"#fff",
+            zIndex:201,overflowY:"auto",paddingTop:14,boxShadow:"4px 0 20px rgba(0,0,0,.15)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"0 14px 12px"}}>
+              <span style={{fontSize:15,fontWeight:700,color:"#1c1917"}}>𝄞 ScoreView</span>
+              <button onClick={()=>setShowSidebar(false)}
+                style={{background:"transparent",border:"none",fontSize:22,cursor:"pointer",color:"#78716c"}}>×</button>
             </div>
-          ))}
+            <SongList/>
+          </div>
+        </>
+      )}
 
-          {addingSong ? (
-            <div style={{padding:"10px 13px"}}>
-              <input autoFocus value={newTitle} onChange={e=>setNewTitle(e.target.value)}
-                onKeyDown={e=>{if(e.key==="Enter")createSong();if(e.key==="Escape")setAddingSong(false);}}
-                placeholder="Song title…"
-                style={{width:"100%",padding:"6px 8px",border:"1px solid #d6d3d1",borderRadius:6,
-                  fontSize:13,fontFamily:"Georgia,serif",marginBottom:6,outline:"none"}}/>
-              <div style={{display:"flex",gap:5}}>
-                <button onClick={createSong}
-                  style={{flex:1,padding:"5px",border:"none",borderRadius:5,background:"#f59e0b",color:"#fff",fontSize:12,cursor:"pointer",fontFamily:"Georgia,serif"}}>
-                  Add
-                </button>
-                <button onClick={()=>setAddingSong(false)}
-                  style={{flex:1,padding:"5px",border:"1px solid #d6d3d1",borderRadius:5,background:"#fff",color:"#78716c",fontSize:12,cursor:"pointer",fontFamily:"Georgia,serif"}}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button onClick={()=>setAddingSong(true)} style={{
-              display:"block",width:"calc(100% - 26px)",margin:"8px 13px",padding:"7px",
-              border:"1px dashed #d6d3d1",borderRadius:7,background:"transparent",
-              cursor:"pointer",fontSize:12,color:"#78716c",fontFamily:"Georgia,serif",
-            }}>+ New Song</button>
-          )}
-        </div>
+      <div style={{display:"flex",minHeight:"calc(100vh - 52px)"}}>
 
-        {/* ── Main ─────────────────────────────────────────────────────────── */}
-        <div style={{flex:1,padding:20,overflowY:"auto"}}>
+        {/* ── Desktop sidebar ── */}
+        {!isMobile && (
+          <div style={{width:220,background:"#fff",borderRight:"1px solid #e7e5e4",
+            padding:"14px 0",flexShrink:0,overflowY:"auto"}}>
+            <SongList/>
+          </div>
+        )}
+
+        {/* ── Main content ── */}
+        <div style={{flex:1,padding:isMobile?"14px":"20px",overflowY:"auto",minWidth:0}}>
 
           {!activeSong ? (
-            <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
-              minHeight:380,gap:14,color:"#a8a29e"}}>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",
+              justifyContent:"center",minHeight:380,gap:14,color:"#a8a29e",padding:"20px"}}>
               <div style={{fontSize:52,opacity:.2}}>𝄞</div>
-              <div style={{fontSize:15,fontWeight:600,color:"#78716c"}}>No song selected</div>
-              <div style={{fontSize:13}}>Create a new song to get started</div>
-              <button onClick={()=>setAddingSong(true)} style={{
-                marginTop:6,padding:"9px 22px",border:"1px solid #d6d3d1",borderRadius:8,
-                background:"#fff",cursor:"pointer",fontSize:13,color:"#44403c",fontFamily:"Georgia,serif",
-              }}>+ New Song</button>
+              <div style={{fontSize:16,fontWeight:600,color:"#78716c",textAlign:"center"}}>No song selected</div>
+              <div style={{fontSize:13,textAlign:"center"}}>
+                {isMobile ? "Tap ☰ to open the menu and create a song" : "Create a new song in the sidebar"}
+              </div>
+              <button onClick={()=>isMobile?setShowSidebar(true):setAddingSong(true)}
+                style={{...btn(),marginTop:6,padding:"12px 24px",fontSize:14}}>
+                + New Song
+              </button>
             </div>
           ) : (<>
 
-            {/* Song title */}
-            <div style={{marginBottom:18}}>
-              <h2 style={{margin:"0 0 3px",fontSize:21,fontWeight:700}}>{activeSong.title}</h2>
-              <div style={{fontSize:12,color:"#a8a29e"}}>
-                {activeSong.tracks.length} track{activeSong.tracks.length!==1?"s":""}
-                {activeSong.scoreFile ? ` · score: ${activeSong.scoreFile.name}` : ""}
+            {/* Song title + mobile add-track shortcut */}
+            <div style={{marginBottom:16,display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
+              <div style={{minWidth:0}}>
+                <h2 style={{margin:"0 0 3px",fontSize:isMobile?18:21,fontWeight:700,
+                  whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{activeSong.title}</h2>
+                <div style={{fontSize:12,color:"#a8a29e"}}>
+                  {activeSong.tracks.length} track{activeSong.tracks.length!==1?"s":""}
+                  {activeSong.scoreFile?` · 🎼`:""}
+                </div>
               </div>
             </div>
 
-            {/* ── Transport ─────────────────────────────────────────────── */}
-            <div style={{background:"#fff",border:"1px solid #e7e5e4",borderRadius:12,padding:"14px 18px",marginBottom:20}}>
-              <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:10}}>
+            {/* ── Transport ── */}
+            <div style={{background:"#fff",border:"1px solid #e7e5e4",borderRadius:12,
+              padding:isMobile?"12px 14px":"14px 18px",marginBottom:16}}>
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
 
+                {/* Big tap-friendly play button */}
                 <button onClick={isPlaying?stopAll:startPlayback}
                   disabled={!activeSong.tracks.length||decoding}
                   style={{
-                    width:46,height:46,borderRadius:"50%",border:"none",flexShrink:0,
+                    width:isMobile?52:46,height:isMobile?52:46,borderRadius:"50%",border:"none",
+                    flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:isMobile?20:17,color:"#fff",
                     background:activeSong.tracks.length&&!decoding?"#1c1917":"#e7e5e4",
                     cursor:activeSong.tracks.length&&!decoding?"pointer":"default",
-                    fontSize:17,color:"#fff",
-                    display:"flex",alignItems:"center",justifyContent:"center",
                   }}>
                   {decoding
-                    ? <span style={{fontSize:14,display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>
-                    : isPlaying ? "⏹" : "▶"}
+                    ? <span style={{display:"inline-block",animation:"spin .8s linear infinite",fontSize:16}}>⟳</span>
+                    : isPlaying?"⏹":"▶"}
                 </button>
 
-                <div style={{flex:1}}>
+                <div style={{flex:1,minWidth:0}}>
                   <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                    <span style={{fontSize:12,fontWeight:600,color:"#44403c",fontFamily:"monospace"}}>{formatTime(currentTime)}</span>
-                    <span style={{fontSize:12,color:"#a8a29e",fontFamily:"monospace"}}>{formatTime(duration)}</span>
+                    <span style={{fontSize:13,fontWeight:600,color:"#44403c",fontFamily:"monospace"}}>{formatTime(currentTime)}</span>
+                    <span style={{fontSize:13,color:"#a8a29e",fontFamily:"monospace"}}>{formatTime(duration)}</span>
                   </div>
-                  {/* Seekbar */}
-                  <div style={{height:5,background:"#e7e5e4",borderRadius:3,cursor:"pointer",position:"relative",userSelect:"none"}}
+                  {/* Seekbar — tall enough to tap on mobile */}
+                  <div
+                    style={{height:isMobile?10:5,background:"#e7e5e4",borderRadius:5,
+                      cursor:"pointer",position:"relative",userSelect:"none"}}
                     onClick={e=>{const r=e.currentTarget.getBoundingClientRect();seekTo((e.clientX-r.left)/r.width);}}>
                     <div style={{position:"absolute",top:0,left:0,height:"100%",background:"#f59e0b",
-                      borderRadius:3,width:progressPct+"%",pointerEvents:"none",transition:"width .08s linear"}}/>
+                      borderRadius:5,width:progressPct+"%",pointerEvents:"none",transition:"width .08s linear"}}/>
                   </div>
                 </div>
-
-                {/* Active dots */}
-                <div style={{display:"flex",gap:4,flexShrink:0}}>
-                  {activeSong.tracks.map(t=>{
-                    const dim = soloTrack ? soloTrack!==t.id : !!mutedTracks[t.id];
-                    return <div key={t.id} title={t.name} style={{
-                      width:8,height:8,borderRadius:"50%",background:dim?"#e7e5e4":t.color,
-                      transition:"background .2s",
-                      boxShadow:!dim&&isPlaying?`0 0 5px ${t.color}`:"none",
-                    }}/>;
-                  })}
-                </div>
               </div>
-
-              {/* Status line */}
               <div style={{fontSize:11,color:decodeError?"#ef4444":"#a8a29e",fontStyle:"italic"}}>
-                {decodeError ? `⚠ ${decodeError}`
-                  : decoding ? "Decoding audio…"
-                  : !activeSong.tracks.length ? "Add audio tracks below to enable playback"
-                  : isPlaying ? `Playing ${activeCount} of ${activeSong.tracks.length} track${activeSong.tracks.length!==1?"s":""}`
-                  : "Press ▶ to play all tracks in sync"}
+                {decodeError?`⚠ ${decodeError}`
+                  :decoding?"Decoding audio…"
+                  :!activeSong.tracks.length?"Add audio tracks below to enable playback"
+                  :isPlaying?`Playing ${activeCount} of ${activeSong.tracks.length} track${activeSong.tracks.length!==1?"s":""}`
+                  :"Press ▶ to play all tracks in sync"}
               </div>
             </div>
 
-            {/* ── Audio Tracks ──────────────────────────────────────────── */}
-            <div style={{marginBottom:22}}>
+            {/* ── Instrument Tracks ── */}
+            <div style={{marginBottom:20}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
                 <h3 style={{margin:0,fontSize:14,fontWeight:700,color:"#44403c"}}>
                   Instrument Tracks
@@ -618,123 +672,108 @@ export default function App() {
                 </h3>
               </div>
 
-              {/* Big multi-upload drop zone */}
-              <DropArea onFiles={handleTrackUpload} accept="audio/*,.mp3,.wav,.ogg,.flac,.aac,.m4a,.opus"
-                multiple color="#6366f1">
-                <div style={{padding:"10px 0"}}>
-                  <div style={{fontSize:32,marginBottom:8,opacity:.5}}>🎼</div>
-                  <div style={{fontSize:14,fontWeight:600,color:"#44403c",marginBottom:4}}>
-                    Drop all your instrument audio files here
+              {/* Upload drop zone */}
+              <DropArea onFiles={handleTrackUpload}
+                accept="audio/*,.mp3,.wav,.ogg,.flac,.aac,.m4a,.opus" multiple color="#6366f1">
+                <div style={{padding:"8px 0"}}>
+                  <div style={{fontSize:28,marginBottom:6,opacity:.5}}>🎵</div>
+                  <div style={{fontSize:13,fontWeight:600,color:"#44403c",marginBottom:3}}>
+                    {isMobile?"Tap to add instrument audio":"Drop instrument audio files here"}
                   </div>
                   <div style={{fontSize:12,color:"#78716c",marginBottom:6}}>
-                    Select or drop <strong>multiple files at once</strong> — one per instrument or voice
+                    {isMobile?"Select multiple files — one per instrument":"Select or drop multiple files at once — one per instrument"}
                   </div>
-                  <div style={{display:"flex",gap:6,justifyContent:"center",flexWrap:"wrap"}}>
-                    {["🎹 Piano","🎻 Violin","🎺 Trumpet","🥁 Drums","🎸 Guitar","🎷 Sax","🎤 Vocals"].map(lbl=>(
-                      <span key={lbl} style={{fontSize:10,padding:"2px 8px",background:"#f5f5f4",
-                        border:"1px solid #e7e5e4",borderRadius:10,color:"#78716c"}}>{lbl}</span>
+                  <div style={{display:"flex",gap:5,justifyContent:"center",flexWrap:"wrap"}}>
+                    {["🎹","🎻","🎺","🥁","🎸","🎷","🎤"].map(i=>(
+                      <span key={i} style={{fontSize:18}}>{i}</span>
                     ))}
                   </div>
-                  <div style={{fontSize:11,color:"#a8a29e",marginTop:8}}>MP3 · WAV · OGG · FLAC · AAC · M4A</div>
+                  <div style={{fontSize:11,color:"#a8a29e",marginTop:6}}>MP3 · WAV · OGG · FLAC · AAC · M4A</div>
                 </div>
               </DropArea>
 
               {activeSong.tracks.length>0&&(
                 <div style={{fontSize:11,color:"#a8a29e",margin:"8px 0 10px",fontStyle:"italic"}}>
-                  ↓ {activeSong.tracks.length} track{activeSong.tracks.length!==1?"s":""} — all play together in sync · drop more files above to add
+                  {activeSong.tracks.length} track{activeSong.tracks.length!==1?"s":""} — all play in sync · tap above to add more
                 </div>
               )}
 
-              {activeSong.tracks.map((track, ti) => {
-                const isMuted = soloTrack ? soloTrack!==track.id : !!mutedTracks[track.id];
+              {activeSong.tracks.map((track,ti)=>{
+                const isMuted = soloTrack?soloTrack!==track.id:!!mutedTracks[track.id];
                 const isSolo  = soloTrack===track.id;
-                const ICONS = ["🎹","🎻","🎺","🥁","🎸","🎷","🎤","🪗","🎵"];
-                const icon  = track.icon || ICONS[ti % ICONS.length];
+                const ICONS   = ["🎹","🎻","🎺","🥁","🎸","🎷","🎤","🪗","🎵"];
+                const icon    = track.icon||ICONS[ti%ICONS.length];
                 return (
                   <div key={track.id} style={{
-                    background:"#fff",
-                    border:`1px solid ${!isMuted?track.color+"45":"#e7e5e4"}`,
-                    borderRadius:10,marginBottom:8,overflow:"hidden",
+                    background:"#fff",border:`1px solid ${!isMuted?track.color+"45":"#e7e5e4"}`,
+                    borderRadius:12,marginBottom:10,overflow:"hidden",
                     opacity:isMuted?.42:1,transition:"opacity .2s,border-color .2s",
                   }}>
-                    {/* Track header */}
+                    {/* Track top row: icon + name + remove */}
                     <div style={{
-                      padding:"9px 13px",display:"flex",alignItems:"center",gap:9,
+                      padding:"10px 14px",display:"flex",alignItems:"center",gap:10,
                       background:!isMuted?track.colorLight:"#f5f5f4",
                       borderBottom:`1px solid ${!isMuted?track.color+"20":"#e7e5e4"}`,
                     }}>
-                      {/* Pulsing dot */}
                       <span style={{
                         width:10,height:10,borderRadius:"50%",flexShrink:0,
                         background:!isMuted?track.color:"#d6d3d1",
                         animation:!isMuted&&isPlaying?"pulse 1.2s ease-in-out infinite":"none",
                         boxShadow:!isMuted&&isPlaying?`0 0 5px ${track.color}`:"none",
                       }}/>
-
-                      {/* Instrument icon picker */}
-                      <select
-                        value={icon}
+                      {/* Icon picker */}
+                      <select value={icon}
                         onChange={e=>updateSong(activeSongId,s=>({...s,tracks:s.tracks.map(t=>t.id===track.id?{...t,icon:e.target.value}:t)}))}
-                        style={{border:"none",background:"transparent",fontSize:16,cursor:"pointer",
-                          padding:0,outline:"none",flexShrink:0}}
-                        title="Change instrument">
+                        style={{border:"none",background:"transparent",fontSize:18,
+                          cursor:"pointer",padding:0,outline:"none",flexShrink:0}}>
                         {["🎹","🎻","🎺","🥁","🎸","🎷","🎤","🪗","🎵","🎼","🎶"].map(i=>(
                           <option key={i} value={i}>{i}</option>
                         ))}
                       </select>
-
-                      {/* Editable name */}
+                      {/* Name */}
                       <input value={track.name}
                         onChange={e=>updateSong(activeSongId,s=>({...s,tracks:s.tracks.map(t=>t.id===track.id?{...t,name:e.target.value}:t)}))}
-                        style={{flex:1,border:"none",background:"transparent",fontSize:13,fontWeight:600,
+                        style={{flex:1,border:"none",background:"transparent",fontSize:14,fontWeight:600,
                           color:"#1c1917",fontFamily:"Georgia,serif",outline:"none",minWidth:0}}/>
-
-                      {/* Track number */}
-                      <span style={{fontSize:10,padding:"2px 7px",borderRadius:3,background:track.color,
+                      <span style={{fontSize:10,padding:"2px 7px",borderRadius:4,background:track.color,
                         color:"#fff",fontWeight:700,flexShrink:0}}>#{ti+1}</span>
+                      <button onClick={()=>removeTrack(track.id)}
+                        style={{fontSize:18,padding:"0 4px",border:"none",background:"transparent",
+                          cursor:"pointer",color:"#d6d3d1",lineHeight:1,flexShrink:0}}>×</button>
+                    </div>
 
-                      {/* Mute button */}
+                    {/* Waveform */}
+                    <div style={{padding:"8px 14px 6px"}}>
+                      <WaveBar analyser={analysers[track.id]} color={track.color} active={!isMuted&&isPlaying}/>
+                    </div>
+
+                    {/* Mute / Solo row — large tap targets on mobile */}
+                    <div style={{padding:"6px 14px 12px",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
                       <button onClick={()=>toggleMute(track.id)} disabled={!!soloTrack}
                         style={{
-                          fontSize:11,padding:"3px 10px",borderRadius:5,fontWeight:600,
-                          cursor:soloTrack?"default":"pointer",flexShrink:0,
+                          flex:1,minWidth:isMobile?0:80,padding:"9px 12px",borderRadius:8,
+                          fontWeight:600,fontSize:13,cursor:soloTrack?"default":"pointer",
                           border:`1px solid ${mutedTracks[track.id]?"#ef4444":"#d6d3d1"}`,
-                          background:mutedTracks[track.id]?"#fef2f2":"transparent",
+                          background:mutedTracks[track.id]?"#fef2f2":"#fff",
                           color:mutedTracks[track.id]?"#ef4444":"#78716c",
                           opacity:soloTrack?.35:1,
                         }}>
-                        {mutedTracks[track.id] ? "🔇 Muted" : "🔊 Mute"}
+                        {mutedTracks[track.id]?"🔇 Muted":"🔊 Mute"}
                       </button>
-
-                      {/* Solo button */}
                       <button onClick={()=>toggleSolo(track.id)}
                         style={{
-                          fontSize:11,padding:"3px 10px",borderRadius:5,fontWeight:600,
-                          cursor:"pointer",flexShrink:0,
+                          flex:1,minWidth:isMobile?0:80,padding:"9px 12px",borderRadius:8,
+                          fontWeight:600,fontSize:13,cursor:"pointer",
                           border:`1px solid ${isSolo?track.color:"#d6d3d1"}`,
-                          background:isSolo?track.color:"transparent",
+                          background:isSolo?track.color:"#fff",
                           color:isSolo?"#fff":"#78716c",
                         }}>
-                        {isSolo ? "★ Solo" : "☆ Solo"}
+                        {isSolo?"★ Solo":"☆ Solo"}
                       </button>
-
-                      {/* Remove */}
-                      <button onClick={()=>removeTrack(track.id)} title="Remove this track"
-                        style={{fontSize:11,padding:"3px 8px",border:"1px solid #e7e5e4",borderRadius:5,
-                          background:"transparent",cursor:"pointer",color:"#a8a29e",flexShrink:0}}>
-                        Remove
-                      </button>
-                    </div>
-
-                    {/* Waveform + file info */}
-                    <div style={{padding:"8px 13px 10px"}}>
-                      <WaveBar analyser={analysers[track.id]} color={track.color} active={!isMuted&&isPlaying}/>
-                      <div style={{fontSize:10,color:"#a8a29e",marginTop:4,fontStyle:"italic"}}>
+                      <div style={{fontSize:10,color:"#b0a9a0",fontStyle:"italic",
+                        flex:isMobile?"1 1 100%":"1",textAlign:isMobile?"left":"right",
+                        whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                         {track.file?.name}
-                        {isSolo&&<span style={{marginLeft:8,background:track.color,color:"#fff",
-                          fontSize:9,padding:"1px 5px",borderRadius:3,fontStyle:"normal",fontWeight:700}}>SOLO</span>}
-                        {mutedTracks[track.id]&&!soloTrack&&<span style={{marginLeft:8,background:"#fef2f2",color:"#ef4444",
-                          fontSize:9,padding:"1px 5px",borderRadius:3,fontStyle:"normal",fontWeight:700}}>MUTED</span>}
                       </div>
                     </div>
                   </div>
@@ -742,8 +781,8 @@ export default function App() {
               })}
             </div>
 
-            {/* ── Score ─────────────────────────────────────────────────── */}
-            <div>
+            {/* ── Score ── */}
+            <div style={{marginBottom:20}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
                 <h3 style={{margin:0,fontSize:14,fontWeight:700,color:"#44403c"}}>
                   Music Score
@@ -751,20 +790,21 @@ export default function App() {
                 </h3>
                 {activeSong.scoreFile&&(
                   <button onClick={()=>updateSong(activeSongId,s=>({...s,scoreFile:null}))}
-                    style={{fontSize:11,padding:"4px 10px",border:"1px solid #d6d3d1",borderRadius:5,
+                    style={{fontSize:12,padding:"6px 12px",border:"1px solid #d6d3d1",borderRadius:7,
                       background:"#fff",color:"#78716c",cursor:"pointer"}}>× Remove</button>
                 )}
               </div>
-
               {activeSong.scoreFile ? (
-                <div style={{background:"#fff",border:"1px solid #e7e5e4",borderRadius:10,padding:14}}>
+                <div style={{background:"#fff",border:"1px solid #e7e5e4",borderRadius:10,padding:12,overflowX:"auto"}}>
                   <OsmdViewer xmlContent={activeSong.scoreFile.xmlContent} currentMeasure={currentMeasure}/>
                 </div>
               ) : (
                 <DropArea onFiles={handleScoreUpload} accept=".xml,.mxl,.musicxml" color="#059669">
                   <div style={{padding:"10px 0"}}>
-                    <div style={{fontSize:30,marginBottom:6,opacity:.45}}>🎼</div>
-                    <div style={{fontSize:13,fontWeight:600,color:"#44403c",marginBottom:3}}>Drop MusicXML score here</div>
+                    <div style={{fontSize:28,marginBottom:6,opacity:.45}}>🎼</div>
+                    <div style={{fontSize:13,fontWeight:600,color:"#44403c",marginBottom:3}}>
+                      {isMobile?"Tap to upload MusicXML score":"Drop MusicXML score here"}
+                    </div>
                     <div style={{fontSize:11,color:"#a8a29e"}}>Accepts .xml · .mxl · .musicxml</div>
                     <div style={{fontSize:11,color:"#a8a29e",marginTop:3}}>Free scores at musescore.com or imslp.org</div>
                   </div>
@@ -773,10 +813,11 @@ export default function App() {
             </div>
 
             {/* Tip */}
-            <div style={{marginTop:20,padding:"11px 14px",background:"#fef3c7",borderRadius:8,fontSize:12,color:"#92400e",lineHeight:1.65}}>
-              <strong>How to use:</strong> Drop one audio file per instrument into Audio Tracks — they all play in sync.
-              <strong> M</strong> mutes a track, <strong>S</strong> solos it. Click a name to rename.
-              Drop a MusicXML file into the Score section to see full notation.
+            <div style={{padding:"12px 14px",background:"#fef3c7",borderRadius:10,
+              fontSize:12,color:"#92400e",lineHeight:1.7,marginBottom:20}}>
+              <strong>Tip:</strong> Upload one audio file per instrument — they all play together in sync.
+              Use <strong>Mute</strong> to silence an instrument or <strong>Solo</strong> to hear only that one.
+              {isMobile&&" Tap ☰ to switch songs."}
             </div>
 
           </>)}
