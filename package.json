@@ -2,6 +2,9 @@
   "name": "scoreview",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -10,10 +13,11 @@
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "opensheetmusicdisplay": "^1.8.9"
+    "opensheetmusicdisplay": "^1.8.9",
+    "@supabase/supabase-js": "^2.43.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",
-    "vite": "^4.5.14"
+    "vite": "^5.4.0"
   }
 }
