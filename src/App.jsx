@@ -2,12 +2,10 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ── Supabase client ────────────────────────────────────────────────────────
-// Values come from import.meta.env at build time. On Vercel, set
-// VITE_SUPABASE_URL and VITE_SUPABASE_ANON under Project → Settings → Environment Variables.
-const SUPABASE_URL = String(import.meta.env.VITE_SUPABASE_URL ?? "").trim();
-const SUPABASE_ANON = String(import.meta.env.VITE_SUPABASE_ANON ?? "").trim();
-const sbReady = !!(SUPABASE_URL && SUPABASE_ANON);
-const sb = sbReady ? createClient(SUPABASE_URL, SUPABASE_ANON) : null;
+// Replace these with your actual values from supabase.com → Settings → API
+const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL  || "";
+const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON || "";
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 
 // ── OSMD loader ────────────────────────────────────────────────────────────
 function useOSMD() {
@@ -75,38 +73,6 @@ function OsmdViewer({ xmlContent, currentMeasure }) {
   return <div ref={ref} style={{width:"100%",overflowX:"auto"}}/>;
 }
 
-// ── PDF / image score (not MusicXML — no measure cursor sync) ─────────────
-function RasterScoreViewer({ kind, displayUrl }) {
-  if (kind === "pdf") {
-    return (
-      <div style={{ width: "100%", minHeight: 400 }}>
-        <object data={displayUrl} type="application/pdf" width="100%" height={640}
-          style={{ border: "none", display: "block", borderRadius: 6, background: "#f5f5f4" }}>
-          <div style={{ padding: 16, fontSize: 13, color: "#78716c" }}>
-            PDF preview is not available in this browser.{" "}
-            <a href={displayUrl} target="_blank" rel="noopener noreferrer">Open PDF</a>
-          </div>
-        </object>
-      </div>
-    );
-  }
-  return (
-    <img src={displayUrl} alt="" style={{ maxWidth: "100%", height: "auto", display: "block", borderRadius: 6 }} />
-  );
-}
-
-function ScoreViewer({ scoreFile, currentMeasure }) {
-  if (!scoreFile) return null;
-  const kind = scoreFile.kind || (scoreFile.xmlContent ? "xml" : null);
-  if (kind === "xml" && scoreFile.xmlContent) {
-    return <OsmdViewer xmlContent={scoreFile.xmlContent} currentMeasure={currentMeasure} />;
-  }
-  if ((kind === "pdf" || kind === "image") && scoreFile.displayUrl) {
-    return <RasterScoreViewer kind={kind} displayUrl={scoreFile.displayUrl} />;
-  }
-  return null;
-}
-
 // ── Helpers ────────────────────────────────────────────────────────────────
 const TRACK_COLORS       = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6","#06b6d4","#f97316","#84cc16"];
 const TRACK_COLORS_LIGHT = ["#e0e7ff","#fef3c7","#d1fae5","#fee2e2","#ede9fe","#cffafe","#ffedd5","#ecfccb"];
@@ -123,57 +89,7 @@ function readAsText(file) {
   return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsText(file); });
 }
 function isAudio(f){ return f?.type.startsWith("audio/")||/\.(mp3|wav|ogg|flac|aac|m4a|opus)$/i.test(f?.name); }
-function isXmlScore(f) {
-  return /\.(xml|mxl|musicxml)$/i.test(f?.name) || ["application/xml", "text/xml"].includes(f?.type);
-}
-function isPdfScore(f) {
-  return f?.type === "application/pdf" || /\.pdf$/i.test(f?.name || "");
-}
-function isImageScore(f) {
-  return (typeof f?.type === "string" && f.type.startsWith("image/"))
-    || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f?.name || "");
-}
-function isRasterScore(f) { return isPdfScore(f) || isImageScore(f); }
-function pickScoreFile(files) {
-  return files.find(isXmlScore) || files.find(isRasterScore);
-}
-function rasterKindFromFile(f) {
-  return isPdfScore(f) ? "pdf" : "image";
-}
-function guessMimeForRaster(f) {
-  if (f?.type) return f.type;
-  if (isPdfScore(f)) return "application/pdf";
-  const m = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.exec(f?.name || "");
-  if (!m) return "application/octet-stream";
-  const ext = m[1].toLowerCase();
-  const map = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml" };
-  return map[ext] || "image/jpeg";
-}
-
-const SCORE_MANIFEST = "_svScore";
-function scoreRowToScoreFile(row) {
-  if (!row) return null;
-  const name = row.name;
-  const dbId = row.id;
-  const raw = row.xml_content;
-  const text = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
-  const t = text.trimStart();
-  if (t.startsWith("{")) {
-    try {
-      const meta = JSON.parse(text);
-      if (meta && meta[SCORE_MANIFEST] === "v1" && meta.url && (meta.kind === "pdf" || meta.kind === "image")) {
-        return {
-          name,
-          dbId,
-          kind: meta.kind,
-          displayUrl: meta.url,
-          storagePath: meta.path || null,
-        };
-      }
-    } catch (_) { /* fall through as MusicXML */ }
-  }
-  return { name, dbId, kind: "xml", xmlContent: text };
-}
+function isScore(f){ return /\.(xml|mxl|musicxml)$/i.test(f?.name)||["application/xml","text/xml"].includes(f?.type); }
 
 // ── Waveform ───────────────────────────────────────────────────────────────
 function WaveBar({ analyser, color, active }) {
@@ -238,26 +154,15 @@ function SaveBadge({ status }) {
 
 // ── Supabase not configured warning ───────────────────────────────────────
 function NotConfigured() {
-  const prod = import.meta.env.PROD;
   return (
     <div style={{margin:20,padding:16,background:"#fef3c7",borderRadius:10,fontSize:13,color:"#92400e",lineHeight:1.8}}>
       <strong>⚙ Supabase not configured</strong><br/>
-      {prod ? (
-        <>
-          Set <strong>VITE_SUPABASE_URL</strong> and <strong>VITE_SUPABASE_ANON</strong> in your deployment
-          (e.g. Vercel → Project → <strong>Settings → Environment Variables</strong>), using the values from
-          Supabase → <strong>Project Settings → API</strong>. Redeploy after saving.
-        </>
-      ) : (
-        <>
-          Create a <code>.env</code> file in your project root with:<br/>
-          <code style={{display:"block",background:"#fff7ed",padding:"8px 12px",borderRadius:6,marginTop:8,fontSize:12}}>
-            VITE_SUPABASE_URL=https://your-project.supabase.co<br/>
-            VITE_SUPABASE_ANON=your-anon-key
-          </code>
-          Then run <code>npm run dev</code> — songs will persist to your Supabase database.
-        </>
-      )}
+      Create a <code>.env</code> file in your project root with:<br/>
+      <code style={{display:"block",background:"#fff7ed",padding:"8px 12px",borderRadius:6,marginTop:8,fontSize:12}}>
+        VITE_SUPABASE_URL=https://your-project.supabase.co<br/>
+        VITE_SUPABASE_ANON=your-anon-key
+      </code>
+      Then run <code>npm run dev</code> — songs will persist to your Supabase database.
     </div>
   );
 }
@@ -270,6 +175,7 @@ export default function App() {
   const [newTitle,      setNewTitle]        = useState("");
   const [appLoading,    setAppLoading]      = useState(true);
   const [saveStatus,    setSaveStatus]      = useState("idle"); // idle|saving|saved|error
+  const [sbReady,       setSbReady]         = useState(!!(SUPABASE_URL && SUPABASE_ANON));
 
   // Playback
   const [isPlaying,     setIsPlaying]      = useState(false);
@@ -278,6 +184,8 @@ export default function App() {
   const [currentMeasure,setCurrentMeasure] = useState(-1);
   const [mutedTracks,   setMutedTracks]    = useState({});
   const [soloTrack,     setSoloTrack]      = useState(null);
+  const [trackVolumes,  setTrackVolumes]   = useState({}); // trackId -> 0..100
+  const [expandedControls,setExpandedControls]=useState({}); // trackId -> bool
   const [analysers,     setAnalysers]      = useState({});
   const [decoding,      setDecoding]       = useState(false);
   const [decodeError,   setDecodeError]    = useState("");
@@ -292,12 +200,14 @@ export default function App() {
   const decodedBufs  = useRef({});
   const mutedRef     = useRef({});
   const soloRef      = useRef(null);
+  const volumeRef    = useRef({});  // trackId -> 0..1
   const saveTimer    = useRef(null);
 
   const activeSong = songs.find(s=>s.id===activeSongId)??null;
 
   useEffect(()=>{ mutedRef.current=mutedTracks; },[mutedTracks]);
   useEffect(()=>{ soloRef.current=soloTrack; },[soloTrack]);
+  useEffect(()=>{ volumeRef.current=trackVolumes; },[trackVolumes]);
   useEffect(()=>{
     const fn=()=>{ const m=window.innerWidth<640; setIsMobile(m); if(!m) setShowSidebar(false); };
     window.addEventListener("resize",fn);
@@ -329,16 +239,20 @@ export default function App() {
               icon:       t.icon||"🎵",
               color:      t.color,
               colorLight: t.color_light,
-              audioUrl:   t.audio_url,   // public URL — no File object on load
+              audioUrl:   t.audio_url,
               file:       null,
             })),
-          scoreFile: (() => {
-            const row = (scoreRows || []).find((r) => r.song_id === s.id);
-            return row ? scoreRowToScoreFile(row) : null;
-          })(),
+          scoreFile: (scoreRows||[]).find(r=>r.song_id===s.id)
+            ? { name: (scoreRows||[]).find(r=>r.song_id===s.id).name,
+                xmlContent: (scoreRows||[]).find(r=>r.song_id===s.id).xml_content,
+                dbId: (scoreRows||[]).find(r=>r.song_id===s.id).id }
+            : null,
         }));
         setSongs(loaded);
-        if (loaded.length) setActiveSongId(loaded[0].id);
+        if (loaded.length) {
+          setActiveSongId(loaded[0].id);
+
+        }
       } catch(e) {
         console.error("Load error:", e);
       } finally {
@@ -381,10 +295,6 @@ export default function App() {
 
   const deleteSong = async (id)=>{
     stopAll();
-    const victim = songs.find(s=>s.id===id);
-    if (sbReady && victim?.scoreFile?.storagePath) {
-      try { await sb.storage.from("audio").remove([victim.scoreFile.storagePath]); } catch(e) { console.warn(e); }
-    }
     setSongs(p=>p.filter(s=>s.id!==id));
     if (activeSongId===id) setActiveSongId(songs.find(s=>s.id!==id)?.id??null);
     if (!sbReady) return;
@@ -395,6 +305,7 @@ export default function App() {
   const selectSong = (id)=>{
     if (id===activeSongId) return;
     stopAll(); setActiveSongId(id); setMutedTracks({}); setSoloTrack(null);
+    setTrackVolumes({}); setExpandedControls({});
     setCurrentTime(0); setCurrentMeasure(-1); setDuration(0); setDecodeError("");
   };
 
@@ -419,8 +330,9 @@ export default function App() {
 
       // Optimistic UI — add with local blob URL first
       const previewUrl = URL.createObjectURL(file);
-      const optimistic = {id:trackId,name,icon,color,colorLight,audioUrl:previewUrl,file};
+      const optimistic = {id:trackId,name,icon,color,colorLight,audioUrl:previewUrl,file,volume:100};
       updateSong(activeSongId,s=>({...s,tracks:[...s.tracks,optimistic]}));
+      setTrackVolumes(p=>({...p,[trackId]:100}));
 
       if (!sbReady) continue;
 
@@ -475,119 +387,50 @@ export default function App() {
     await sb.from("tracks").update({icon}).eq("id",trackId);
   };
 
+  const changeTrackVolume = (trackId, volume)=>{
+    setTrackVolumes(p=>({...p,[trackId]:volume}));
+    const ctx=audioCtxRef.current;
+    const node=sourcesRef.current[trackId];
+    if (ctx&&node) {
+      const muted=soloRef.current?soloRef.current!==trackId:!!mutedRef.current[trackId];
+      node.gainNode.gain.setTargetAtTime(muted?0:volume/100, ctx.currentTime, .015);
+    }
+  };
+
   // ── Score upload ───────────────────────────────────────────────────────────
   const handleScoreUpload = async (files)=>{
-    const list = Array.isArray(files) ? files : [];
-    const file = pickScoreFile(list);
-    if (!file) {
-      alert("Upload MusicXML (.xml, .mxl, .musicxml), a PDF, or an image (PNG, JPG, WebP, …).");
-      return;
-    }
+    const file = files.find(isScore)||files[0];
+    if (!file) return;
     setSaveStatus("saving");
     try {
-      const prev = activeSong?.scoreFile;
-      if (prev?.displayUrl?.startsWith("blob:")) URL.revokeObjectURL(prev.displayUrl);
-
-      if (isXmlScore(file)) {
-        const xmlContent = await readAsText(file);
-        const scoreFile = { name: file.name, kind: "xml", xmlContent };
-
-        if (!sbReady) {
-          updateSong(activeSongId, (s) => ({ ...s, scoreFile }));
-          flashSaved();
-          return;
-        }
-
-        if (prev?.dbId) {
-          if (prev.storagePath) {
-            try { await sb.storage.from("audio").remove([prev.storagePath]); } catch (e) { console.warn(e); }
-          }
-          await sb.from("scores").delete().eq("id", prev.dbId);
-        }
-
-        const { data, error } = await sb.from("scores").insert({
-          song_id: activeSongId,
-          name: file.name,
-          xml_content: xmlContent,
-        }).select().single();
-        if (error) throw error;
-
-        updateSong(activeSongId, (s) => ({ ...s, scoreFile: { ...scoreFile, dbId: data.id } }));
-        flashSaved();
-        return;
-      }
-
-      // PDF or image — upload to same bucket as tracks (path prefix avoids collisions)
-      const rk = rasterKindFromFile(file);
-      const mime = guessMimeForRaster(file);
-      const rawExt = (String(file.name || "").match(/\.([^.]+)$/) || [])[1];
-      const ext = (rawExt || (rk === "pdf" ? "pdf" : "png")).replace(/[^a-z0-9]/gi, "").toLowerCase() || (rk === "pdf" ? "pdf" : "png");
-      const path = `${activeSongId}/_score_${Date.now()}.${ext}`;
+      const xmlContent = await readAsText(file);
+      const scoreFile  = {name:file.name,xmlContent};
 
       if (!sbReady) {
-        const displayUrl = URL.createObjectURL(file);
-        updateSong(activeSongId, (s) => ({
-          ...s,
-          scoreFile: { name: file.name, kind: rk, displayUrl },
-        }));
-        flashSaved();
-        return;
+        updateSong(activeSongId,s=>({...s,scoreFile})); flashSaved(); return;
       }
 
-      if (prev?.dbId) {
-        if (prev.storagePath) {
-          try { await sb.storage.from("audio").remove([prev.storagePath]); } catch (e) { console.warn(e); }
-        }
-        await sb.from("scores").delete().eq("id", prev.dbId);
-      }
-
-      const { error: upErr } = await sb.storage.from("audio").upload(path, file, { contentType: mime, upsert: true });
-      if (upErr) throw upErr;
-
-      const { data: urlData } = sb.storage.from("audio").getPublicUrl(path);
-      const publicUrl = urlData.publicUrl;
-      const manifest = JSON.stringify({
-        [SCORE_MANIFEST]: "v1",
-        kind: rk,
-        url: publicUrl,
-        path,
-        mime,
-      });
+      // Upsert — remove old score row if exists, insert new
+      const existing = activeSong?.scoreFile?.dbId;
+      if (existing) await sb.from("scores").delete().eq("id",existing);
 
       const { data, error } = await sb.from("scores").insert({
-        song_id: activeSongId,
-        name: file.name,
-        xml_content: manifest,
+        song_id:activeSongId, name:file.name, xml_content:xmlContent,
       }).select().single();
       if (error) throw error;
 
-      updateSong(activeSongId, (s) => ({
-        ...s,
-        scoreFile: {
-          name: file.name,
-          kind: rk,
-          displayUrl: publicUrl,
-          storagePath: path,
-          dbId: data.id,
-        },
-      }));
+      updateSong(activeSongId,s=>({...s,scoreFile:{...scoreFile,dbId:data.id}}));
       flashSaved();
-    } catch (e) {
-      console.error(e);
-      setSaveStatus("error");
+    } catch(e) {
+      console.error(e); setSaveStatus("error");
     }
   };
 
   const removeScore = async ()=>{
-    const prev = activeSong?.scoreFile;
-    const dbId = prev?.dbId;
-    updateSong(activeSongId, (s) => ({ ...s, scoreFile: null }));
-    if (prev?.displayUrl?.startsWith("blob:")) URL.revokeObjectURL(prev.displayUrl);
-    if (!sbReady || !dbId) return;
-    if (prev?.storagePath) {
-      try { await sb.storage.from("audio").remove([prev.storagePath]); } catch (e) { console.warn(e); }
-    }
-    await sb.from("scores").delete().eq("id", dbId);
+    const dbId = activeSong?.scoreFile?.dbId;
+    updateSong(activeSongId,s=>({...s,scoreFile:null}));
+    if (!sbReady||!dbId) return;
+    await sb.from("scores").delete().eq("id",dbId);
   };
 
   // ── Audio context ──────────────────────────────────────────────────────────
@@ -613,6 +456,23 @@ export default function App() {
     }
   };
 
+  const wireAndStartTrack=(ctx,track,offset=0)=>{
+    const buf=decodedBufs.current[track.id];
+    if (!buf) return null;
+    const source=ctx.createBufferSource(), analyser=ctx.createAnalyser(), gainNode=ctx.createGain();
+    source.buffer=buf;
+    analyser.fftSize=512;
+    const muted=soloRef.current?soloRef.current!==track.id:!!mutedRef.current[track.id];
+    const vol=(volumeRef.current[track.id]??100)/100;
+    gainNode.gain.value=muted?0:vol;
+    source.connect(analyser);
+    analyser.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    if (offset>0) source.start(0, Math.min(offset, buf.duration-0.05));
+    else source.start(0);
+    return {source, gainNode, analyser};
+  };
+
   const stopAll=useCallback(()=>{
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current=null; }
     Object.values(sourcesRef.current).forEach(({source})=>{ try{source.stop();source.disconnect();}catch(e){} });
@@ -625,7 +485,8 @@ export default function App() {
     activeSong.tracks.forEach(t=>{
       const node=sourcesRef.current[t.id]; if (!node) return;
       const m=solo?solo!==t.id:!!muted[t.id];
-      node.gainNode.gain.setTargetAtTime(m?0:1,ctx.currentTime,.015);
+      const vol=(volumeRef.current[t.id]??100)/100;
+      node.gainNode.gain.setTargetAtTime(m?0:vol,ctx.currentTime,.015);
     });
   },[activeSong]);
 
@@ -640,15 +501,10 @@ export default function App() {
     durationRef.current=maxDur; setDuration(maxDur);
     const newAnalysers={},newSources={};
     activeSong.tracks.forEach(t=>{
-      const buf=decodedBufs.current[t.id]; if (!buf) return;
-      const src=ctx.createBufferSource(), an=ctx.createAnalyser(), gn=ctx.createGain();
-      src.buffer=buf; an.fftSize=512;
-      const muted=soloRef.current?soloRef.current!==t.id:!!mutedRef.current[t.id];
-      gn.gain.value=muted?0:1;
-      src.connect(an); an.connect(gn); gn.connect(ctx.destination);
-      src.start(0);
-      newSources[t.id]={source:src,gainNode:gn,analyser:an};
-      newAnalysers[t.id]=an;
+      const nodes=wireAndStartTrack(ctx,t);
+      if (!nodes) return;
+      newSources[t.id]=nodes;
+      newAnalysers[t.id]=nodes.analyser;
     });
     sourcesRef.current=newSources; startedAtRef.current=ctx.currentTime;
     setAnalysers(newAnalysers); setIsPlaying(true);
@@ -670,14 +526,10 @@ export default function App() {
     const offset=ratio*durationRef.current;
     const newAn={},newSrc={};
     activeSong.tracks.forEach(t=>{
-      const buf=decodedBufs.current[t.id]; if (!buf) return;
-      const src=ctx.createBufferSource(),an=ctx.createAnalyser(),gn=ctx.createGain();
-      src.buffer=buf; an.fftSize=512;
-      const muted=soloRef.current?soloRef.current!==t.id:!!mutedRef.current[t.id];
-      gn.gain.value=muted?0:1;
-      src.connect(an); an.connect(gn); gn.connect(ctx.destination);
-      src.start(0,Math.min(offset,buf.duration-.05));
-      newSrc[t.id]={source:src,gainNode:gn,analyser:an}; newAn[t.id]=an;
+      const nodes=wireAndStartTrack(ctx,t,offset);
+      if (!nodes) return;
+      newSrc[t.id]=nodes;
+      newAn[t.id]=nodes.analyser;
     });
     sourcesRef.current=newSrc; startedAtRef.current=ctx.currentTime-offset;
     setAnalysers(newAn); setIsPlaying(true);
@@ -699,7 +551,7 @@ export default function App() {
   // ── Derived ────────────────────────────────────────────────────────────────
   const progressPct  = duration>0?Math.min((currentTime/duration)*100,100):0;
   const activeCount  = activeSong?.tracks.filter(t=>soloTrack?soloTrack===t.id:!mutedTracks[t.id]).length??0;
-  const isConfigured = sbReady;
+  const isConfigured = !!(SUPABASE_URL&&SUPABASE_ANON);
 
   // ── Song list component (shared between sidebar and mobile drawer) ─────────
   const SongList = ()=>(
@@ -916,6 +768,8 @@ export default function App() {
                 const isMuted=soloTrack?soloTrack!==track.id:!!mutedTracks[track.id];
                 const isSolo=soloTrack===track.id;
                 const icon=track.icon||TRACK_ICONS[ti%TRACK_ICONS.length];
+                const vol=trackVolumes[track.id]??100;
+                const controlsOpen=!!expandedControls[track.id];
                 return (
                   <div key={track.id} style={{background:"#fff",
                     border:`1px solid ${!isMuted?track.color+"45":"#e7e5e4"}`,
@@ -943,29 +797,75 @@ export default function App() {
                         style={{fontSize:18,padding:"0 4px",border:"none",background:"transparent",
                           cursor:"pointer",color:"#d6d3d1",lineHeight:1,flexShrink:0}}>×</button>
                     </div>
-                    <div style={{padding:"8px 14px 6px"}}>
+                    <div style={{padding:"8px 14px 0"}}>
                       <WaveBar analyser={analysers[track.id]} color={track.color} active={!isMuted&&isPlaying}/>
                     </div>
-                    <div style={{padding:"6px 14px 12px",display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-                      <button onClick={()=>toggleMute(track.id)} disabled={!!soloTrack}
-                        style={{flex:1,minWidth:80,padding:"9px 12px",borderRadius:8,fontWeight:600,fontSize:13,
-                          cursor:soloTrack?"default":"pointer",
-                          border:`1px solid ${mutedTracks[track.id]?"#ef4444":"#d6d3d1"}`,
-                          background:mutedTracks[track.id]?"#fef2f2":"#fff",
-                          color:mutedTracks[track.id]?"#ef4444":"#78716c",opacity:soloTrack?.35:1}}>
-                        {mutedTracks[track.id]?"🔇 Muted":"🔊 Mute"}
-                      </button>
-                      <button onClick={()=>toggleSolo(track.id)}
-                        style={{flex:1,minWidth:80,padding:"9px 12px",borderRadius:8,fontWeight:600,fontSize:13,cursor:"pointer",
-                          border:`1px solid ${isSolo?track.color:"#d6d3d1"}`,
-                          background:isSolo?track.color:"#fff",color:isSolo?"#fff":"#78716c"}}>
-                        {isSolo?"★ Solo":"☆ Solo"}
-                      </button>
-                      <div style={{fontSize:10,color:"#b0a9a0",fontStyle:"italic",
-                        flex:isMobile?"1 1 100%":"1",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
-                        {track.file?.name||track.audioUrl?.split("/").pop()||""}
+
+                    <button
+                      type="button"
+                      aria-expanded={controlsOpen}
+                      onClick={()=>setExpandedControls(p=>({...p,[track.id]:!p[track.id]}))}
+                      style={{
+                        width:"100%",padding:"8px 14px",display:"flex",alignItems:"center",gap:8,
+                        border:"none",borderTop:"1px solid #e7e5e4",background:controlsOpen?"#fafaf9":"#fff",
+                        cursor:"pointer",fontSize:12,fontWeight:600,color:"#57534e",textAlign:"left",
+                      }}>
+                      <span style={{
+                        display:"inline-block",fontSize:10,color:"#a8a29e",
+                        transform:controlsOpen?"rotate(90deg)":"rotate(0deg)",transition:"transform .15s",
+                      }}>▶</span>
+                      <span>Track controls</span>
+                      {!controlsOpen&&(
+                        <span style={{marginLeft:"auto",fontSize:11,fontWeight:400,color:"#a8a29e",fontFamily:"monospace"}}>
+                          {vol}% · {isMuted?(isSolo?"solo":"muted"):"on"}
+                        </span>
+                      )}
+                    </button>
+
+                    {controlsOpen&&(
+                      <div style={{padding:"0 14px 12px",borderTop:"1px solid #f5f5f4",background:"#fafaf9"}}>
+                        <div style={{padding:"10px 0 8px",display:"flex",alignItems:"center",gap:10}}>
+                          <span style={{fontSize:13,fontWeight:600,color:"#78716c",flexShrink:0,width:52}}>Volume</span>
+                          <span style={{fontSize:14,flexShrink:0}} title="Volume">
+                            {vol===0?"🔈":vol<50?"🔉":"🔊"}
+                          </span>
+                          <input
+                            type="range" min={0} max={100} step={1}
+                            value={vol}
+                            onChange={e=>changeTrackVolume(track.id, Number(e.target.value))}
+                            style={{
+                              flex:1, height:4, borderRadius:2, outline:"none", cursor:"pointer",
+                              accentColor: track.color,
+                              background:`linear-gradient(to right, ${track.color} ${vol}%, #e7e5e4 ${vol}%)`,
+                            }}
+                          />
+                          <span style={{fontSize:12,fontFamily:"monospace",color:"#78716c",
+                            flexShrink:0,minWidth:32,textAlign:"right"}}>
+                            {vol}%
+                          </span>
+                        </div>
+                        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                          <button onClick={()=>toggleMute(track.id)} disabled={!!soloTrack}
+                            style={{flex:1,minWidth:80,padding:"9px 12px",borderRadius:8,fontWeight:600,fontSize:13,
+                              cursor:soloTrack?"default":"pointer",
+                              border:`1px solid ${mutedTracks[track.id]?"#ef4444":"#d6d3d1"}`,
+                              background:mutedTracks[track.id]?"#fef2f2":"#fff",
+                              color:mutedTracks[track.id]?"#ef4444":"#78716c",opacity:soloTrack?.35:1}}>
+                            {mutedTracks[track.id]?"🔇 Muted":"🔊 Mute"}
+                          </button>
+                          <button onClick={()=>toggleSolo(track.id)}
+                            style={{flex:1,minWidth:80,padding:"9px 12px",borderRadius:8,fontWeight:600,fontSize:13,cursor:"pointer",
+                              border:`1px solid ${isSolo?track.color:"#d6d3d1"}`,
+                              background:isSolo?track.color:"#fff",color:isSolo?"#fff":"#78716c"}}>
+                            {isSolo?"★ Solo":"☆ Solo"}
+                          </button>
+                        </div>
+                        <div style={{fontSize:10,color:"#b0a9a0",fontStyle:"italic",marginTop:8,
+                          whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                          {track.file?.name||track.audioUrl?.split("/").pop()||""}
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 );
               })}
@@ -986,26 +886,17 @@ export default function App() {
               </div>
               {activeSong.scoreFile?(
                 <div style={{background:"#fff",border:"1px solid #e7e5e4",borderRadius:10,padding:12,overflowX:"auto"}}>
-                  <ScoreViewer scoreFile={activeSong.scoreFile} currentMeasure={currentMeasure}/>
-                  {(activeSong.scoreFile.kind==="pdf"||activeSong.scoreFile.kind==="image")&&(
-                    <p style={{margin:"10px 0 0",fontSize:11,color:"#a8a29e",fontStyle:"italic"}}>
-                      PDF and images are shown as a static sheet. Playback measure highlight applies to MusicXML only.
-                    </p>
-                  )}
+                  <OsmdViewer xmlContent={activeSong.scoreFile.xmlContent} currentMeasure={currentMeasure}/>
                 </div>
               ):(
-                <DropArea onFiles={handleScoreUpload}
-                  accept=".xml,.mxl,.musicxml,.pdf,.png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,application/pdf,image/*"
-                  color="#059669">
+                <DropArea onFiles={handleScoreUpload} accept=".xml,.mxl,.musicxml" color="#059669">
                   <div style={{padding:"10px 0"}}>
                     <div style={{fontSize:28,marginBottom:6,opacity:.45}}>🎼</div>
                     <div style={{fontSize:13,fontWeight:600,color:"#44403c",marginBottom:3}}>
-                      {isMobile?"Tap to upload a score":"Drop a score here"}
+                      {isMobile?"Tap to upload MusicXML score":"Drop MusicXML score here"}
                     </div>
-                    <div style={{fontSize:11,color:"#a8a29e"}}>
-                      MusicXML (.xml, .mxl) · PDF · images (PNG, JPG, WebP…)
-                    </div>
-                    <div style={{fontSize:11,color:"#a8a29e",marginTop:3}}>MusicXML: musescore.com, imslp.org · PDF/image: scan or export</div>
+                    <div style={{fontSize:11,color:"#a8a29e"}}>Accepts .xml · .mxl · .musicxml</div>
+                    <div style={{fontSize:11,color:"#a8a29e",marginTop:3}}>Free scores at musescore.com or imslp.org</div>
                   </div>
                 </DropArea>
               )}
