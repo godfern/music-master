@@ -167,6 +167,554 @@ function NotConfigured() {
   );
 }
 
+// ── Track Recorder with Metronome ─────────────────────────────────────────
+function getSupportedMimeType() {
+  const types = ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/ogg"];
+  return types.find(t => MediaRecorder.isTypeSupported(t)) || "";
+}
+
+function TrackRecorder({ trackId, trackColor, trackName, onSaveRecording }) {
+  const [open,        setOpen]        = useState(false);
+  const [bpm,         setBpm]         = useState(120);
+  const [beatsPerBar, setBeatsPerBar] = useState(4);
+  const [countIn,     setCountIn]     = useState(2);
+  const [phase,       setPhase]       = useState("idle"); // idle|countdown|recording|done
+  const [beat,        setBeat]        = useState(0);
+  const [bar,         setBar]         = useState(0);
+  const [elapsed,     setElapsed]     = useState(0);
+  const [blob,        setBlob]        = useState(null);
+  const [blobUrl,     setBlobUrl]     = useState(null);
+  const [micError,    setMicError]    = useState("");
+
+  const metroCtxRef    = useRef(null);
+  const schedulerRef   = useRef(null);
+  const mediaRecRef    = useRef(null);
+  const chunksRef      = useRef([]);
+  const nextBeatRef    = useRef(0);
+  const beatCountRef   = useRef(0);
+  const rafRef         = useRef(null);
+  const startTimeRef   = useRef(0);
+  const isRecordingRef = useRef(false); // when true, clicks are silent (visual only)
+
+  // Click is only emitted during count-in. Once recording starts,
+  // isRecordingRef=true and we skip the audio entirely → beat stays visual only.
+  const scheduleClick = (ctx, time, isAccent) => {
+    if (isRecordingRef.current) return; // silent during recording
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = isAccent ? 1000 : 800;
+    gain.gain.setValueAtTime(isAccent ? 0.5 : 0.3, time);
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
+    osc.start(time);
+    osc.stop(time + 0.05);
+  };
+
+  const runScheduler = useCallback((bpmVal, bpb) => {
+    const ctx = metroCtxRef.current;
+    if (!ctx) return;
+    const secPerBeat = 60 / bpmVal;
+    while (nextBeatRef.current < ctx.currentTime + 0.1) {
+      const bc = beatCountRef.current;
+      scheduleClick(ctx, nextBeatRef.current, bc % bpb === 0);
+      const tCopy = nextBeatRef.current, bcCopy = bc;
+      setTimeout(() => {
+        setBeat(bcCopy % bpb);
+        setBar(Math.floor(bcCopy / bpb));
+      }, Math.max(0, (tCopy - ctx.currentTime) * 1000));
+      nextBeatRef.current  += secPerBeat;
+      beatCountRef.current += 1;
+    }
+    schedulerRef.current = setTimeout(() => runScheduler(bpmVal, bpb), 25);
+  }, []);
+
+  const stopSession = () => {
+    if (schedulerRef.current) { clearTimeout(schedulerRef.current); schedulerRef.current = null; }
+    if (rafRef.current)       { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    if (mediaRecRef.current?.state === "recording") mediaRecRef.current.stop();
+    try { metroCtxRef.current?.close(); } catch(e) {}
+    metroCtxRef.current  = null;
+    isRecordingRef.current = false;
+  };
+
+  const startSession = async () => {
+    setMicError(""); setBlob(null); setBlobUrl(null);
+    isRecordingRef.current = false;
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch(e) {
+      setMicError("Microphone access denied. Please allow mic access and try again.");
+      return;
+    }
+
+    // Single AudioContext for the metronome (speakers only during count-in)
+    const metroCtx = new (window.AudioContext || window.webkitAudioContext)();
+    metroCtxRef.current = metroCtx;
+    beatCountRef.current   = 0;
+    nextBeatRef.current    = metroCtx.currentTime + 0.1;
+    setPhase("countdown"); setBeat(0); setBar(0); setElapsed(0);
+    runScheduler(bpm, beatsPerBar);
+
+    const countInSecs = countIn * beatsPerBar * (60 / bpm);
+    setTimeout(() => {
+      // Silence the metronome the moment recording starts
+      isRecordingRef.current = true;
+      setPhase("recording");
+      startTimeRef.current = Date.now();
+
+      // MediaRecorder captures raw mic stream — no Web Audio in the chain
+      const mr = new MediaRecorder(stream, { mimeType: getSupportedMimeType() });
+      chunksRef.current = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.onstop = () => {
+        const b = new Blob(chunksRef.current, { type: getSupportedMimeType() });
+        setBlobUrl(URL.createObjectURL(b)); setBlob(b); setPhase("done");
+        stream.getTracks().forEach(t => t.stop());
+      };
+      mr.start(100);
+      mediaRecRef.current = mr;
+
+      const tick = () => {
+        setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    }, countInSecs * 1000);
+  };
+
+  const discard = () => {
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    setBlob(null); setBlobUrl(null); setPhase("idle");
+  };
+
+  const save = () => {
+    if (!blob) return;
+    const ext = getSupportedMimeType().includes("ogg") ? "ogg" : "webm";
+    onSaveRecording(blob, `${trackName}-recording.${ext}`);
+    discard(); setOpen(false);
+  };
+
+  useEffect(() => () => { stopSession(); if (blobUrl) URL.revokeObjectURL(blobUrl); }, []);
+
+  const dots = Array.from({ length: beatsPerBar }, (_, i) => i);
+
+  if (!open) return (
+    <button onClick={() => setOpen(true)} style={{
+      display:"flex", alignItems:"center", gap:5, padding:"7px 12px",
+      border:`1px solid ${trackColor}60`, borderRadius:8, background:"transparent",
+      cursor:"pointer", fontSize:12, fontWeight:600, color:trackColor,
+    }}>🎙 Record</button>
+  );
+
+  return (
+    <div style={{ margin:"0 14px 14px", border:`1px solid ${trackColor}40`,
+      borderRadius:10, overflow:"hidden", background:"#fafaf8" }}>
+      <div style={{ padding:"10px 14px", background:trackColor+"15",
+        borderBottom:`1px solid ${trackColor}25`, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <span style={{ fontSize:13, fontWeight:700 }}>🎙 Recorder — {trackName}</span>
+        <button onClick={() => { stopSession(); setOpen(false); discard(); }}
+          style={{ border:"none", background:"transparent", fontSize:18, cursor:"pointer", color:"#a8a29e" }}>×</button>
+      </div>
+
+      <div style={{ padding:14 }}>
+
+        {/* Controls — idle only */}
+        {phase === "idle" && (
+          <div style={{ display:"flex", gap:10, marginBottom:14, flexWrap:"wrap" }}>
+            <div style={{ flex:"1 1 150px" }}>
+              <div style={{ fontSize:11, fontWeight:600, color:"#78716c", marginBottom:5, textTransform:"uppercase", letterSpacing:".08em" }}>Tempo (BPM)</div>
+              <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                <button onClick={() => setBpm(b => Math.max(40,b-5))}
+                  style={{ width:28,height:28,borderRadius:6,border:"1px solid #d6d3d1",background:"#fff",cursor:"pointer",fontSize:14,fontWeight:700,color:"#44403c" }}>−</button>
+                <div style={{ flex:1, textAlign:"center" }}>
+                  <input type="range" min={40} max={240} value={bpm} onChange={e=>setBpm(Number(e.target.value))}
+                    style={{ width:"100%", accentColor:trackColor }}/>
+                  <div style={{ fontSize:22,fontWeight:700,color:trackColor,fontFamily:"monospace" }}>{bpm}</div>
+                </div>
+                <button onClick={() => setBpm(b => Math.min(240,b+5))}
+                  style={{ width:28,height:28,borderRadius:6,border:"1px solid #d6d3d1",background:"#fff",cursor:"pointer",fontSize:14,fontWeight:700,color:"#44403c" }}>+</button>
+              </div>
+            </div>
+            <div style={{ flex:"0 0 100px" }}>
+              <div style={{ fontSize:11, fontWeight:600, color:"#78716c", marginBottom:5, textTransform:"uppercase", letterSpacing:".08em" }}>Time Sig</div>
+              <select value={beatsPerBar} onChange={e=>setBeatsPerBar(Number(e.target.value))}
+                style={{ width:"100%",padding:"7px 8px",border:"1px solid #d6d3d1",borderRadius:8,fontSize:14,fontFamily:"Georgia,serif",background:"#fff",outline:"none",cursor:"pointer" }}>
+                {[2,3,4,6].map(n=><option key={n} value={n}>{n}/4</option>)}
+              </select>
+            </div>
+            <div style={{ flex:"0 0 100px" }}>
+              <div style={{ fontSize:11, fontWeight:600, color:"#78716c", marginBottom:5, textTransform:"uppercase", letterSpacing:".08em" }}>Count-in</div>
+              <select value={countIn} onChange={e=>setCountIn(Number(e.target.value))}
+                style={{ width:"100%",padding:"7px 8px",border:"1px solid #d6d3d1",borderRadius:8,fontSize:14,fontFamily:"Georgia,serif",background:"#fff",outline:"none",cursor:"pointer" }}>
+                {[0,1,2,4].map(n=><option key={n} value={n}>{n===0?"None":`${n} bar${n>1?"s":""}`}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
+
+        {/* Beat dots */}
+        {(phase==="countdown"||phase==="recording") && (
+          <div style={{ marginBottom:14 }}>
+            <div style={{ fontSize:11,color:"#a8a29e",marginBottom:8,fontStyle:"italic" }}>
+              {phase==="countdown"
+                ? `🔊 Count-in: bar ${bar+1} of ${countIn}`
+                : `🔴 Recording — bar ${bar-countIn+1} · metronome is visual only`}
+            </div>
+            <div style={{ display:"flex", gap:8, justifyContent:"center" }}>
+              {dots.map(i => {
+                const active = i===beat%(beatsPerBar);
+                const accent = i===0;
+                return (
+                  <div key={i} style={{
+                    width:accent?38:30, height:accent?38:30, borderRadius:"50%",
+                    background:active?(phase==="countdown"?"#f59e0b":trackColor):(accent?"#e7e5e4":"#f5f5f4"),
+                    border:`2px solid ${active?(phase==="countdown"?"#f59e0b":trackColor):"#e7e5e4"}`,
+                    transition:"background .06s",
+                    boxShadow:active?`0 0 10px ${phase==="countdown"?"#f59e0b80":trackColor+"80"}`:"none",
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:12,fontWeight:700,color:active?"#fff":"#a8a29e",
+                  }}>{i+1}</div>
+                );
+              })}
+            </div>
+            {phase==="recording" && (
+              <div style={{ textAlign:"center",marginTop:10,fontSize:24,fontWeight:700,
+                color:trackColor,fontFamily:"monospace",display:"flex",alignItems:"center",justifyContent:"center",gap:8 }}>
+                <span style={{ width:10,height:10,borderRadius:"50%",background:"#ef4444",
+                  display:"inline-block",animation:"pulse 1s ease-in-out infinite" }}/>
+                {formatTime(elapsed)}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Done */}
+        {phase==="done" && blobUrl && (
+          <div style={{ marginBottom:14 }}>
+            <div style={{ fontSize:12,color:"#059669",fontWeight:600,marginBottom:8 }}>
+              ✓ Recording complete — {formatTime(elapsed)}
+            </div>
+            <audio controls src={blobUrl} style={{ width:"100%",marginBottom:10 }}/>
+            <div style={{ display:"flex",gap:8 }}>
+              <button onClick={save} style={{ flex:1,padding:10,borderRadius:8,border:"none",
+                background:trackColor,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer" }}>
+                ✓ Use this recording
+              </button>
+              <button onClick={discard} style={{ flex:1,padding:10,borderRadius:8,
+                border:"1px solid #d6d3d1",background:"#fff",color:"#78716c",fontSize:13,cursor:"pointer" }}>
+                ✗ Discard
+              </button>
+            </div>
+          </div>
+        )}
+
+        {micError && (
+          <div style={{ padding:"10px 12px",background:"#fef2f2",borderRadius:8,color:"#ef4444",fontSize:12,marginBottom:12 }}>
+            ⚠ {micError}
+          </div>
+        )}
+
+        {phase==="idle" && (
+          <button onClick={startSession} style={{ width:"100%",padding:11,borderRadius:8,border:"none",
+            background:trackColor,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:8 }}>
+            <span>🎙</span>
+            {countIn>0?`Start with ${countIn}-bar count-in at ${bpm} BPM`:`Start Recording at ${bpm} BPM`}
+          </button>
+        )}
+        {(phase==="countdown"||phase==="recording") && (
+          <button onClick={stopSession} style={{ width:"100%",padding:11,borderRadius:8,border:"none",
+            background:"#ef4444",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:8 }}>
+            ⏹ Stop
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── New Track Recorder (creates a brand-new track, no upload needed) ───────
+function NewTrackRecorder({ songId, trackCount, onSaveRecording }) {
+  const [open,        setOpen]        = useState(false);
+  const [trackName,   setTrackName]   = useState("");
+  const [bpm,         setBpm]         = useState(120);
+  const [beatsPerBar, setBeatsPerBar] = useState(4);
+  const [countIn,     setCountIn]     = useState(2);
+  const [phase,       setPhase]       = useState("idle");
+  const [beat,        setBeat]        = useState(0);
+  const [bar,         setBar]         = useState(0);
+  const [elapsed,     setElapsed]     = useState(0);
+  const [blob,        setBlob]        = useState(null);
+  const [blobUrl,     setBlobUrl]     = useState(null);
+  const [micError,    setMicError]    = useState("");
+
+  const metroCtxRef    = useRef(null);
+  const schedulerRef   = useRef(null);
+  const mediaRecRef    = useRef(null);
+  const chunksRef      = useRef([]);
+  const nextBeatRef    = useRef(0);
+  const beatCountRef   = useRef(0);
+  const rafRef         = useRef(null);
+  const startTimeRef   = useRef(0);
+  const isRecordingRef = useRef(false);
+
+  useEffect(() => {
+    if (open) setTrackName(`Track ${trackCount + 1}`);
+  }, [open]);
+
+  const scheduleClick = (ctx, time, isAccent) => {
+    if (isRecordingRef.current) return; // silent during recording — visual only
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.value = isAccent ? 1000 : 800;
+    gain.gain.setValueAtTime(isAccent ? 0.5 : 0.3, time);
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
+    osc.start(time); osc.stop(time + 0.05);
+  };
+
+  const runScheduler = useCallback((bpmVal, bpb) => {
+    const ctx = metroCtxRef.current; if (!ctx) return;
+    const spb = 60 / bpmVal;
+    while (nextBeatRef.current < ctx.currentTime + 0.1) {
+      const bc = beatCountRef.current;
+      scheduleClick(ctx, nextBeatRef.current, bc % bpb === 0);
+      const tC = nextBeatRef.current, bC = bc;
+      setTimeout(() => { setBeat(bC % bpb); setBar(Math.floor(bC / bpb)); },
+        Math.max(0, (tC - ctx.currentTime) * 1000));
+      nextBeatRef.current  += spb;
+      beatCountRef.current += 1;
+    }
+    schedulerRef.current = setTimeout(() => runScheduler(bpmVal, bpb), 25);
+  }, []);
+
+  const stopSession = () => {
+    if (schedulerRef.current) { clearTimeout(schedulerRef.current); schedulerRef.current = null; }
+    if (rafRef.current)       { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    if (mediaRecRef.current?.state === "recording") mediaRecRef.current.stop();
+    try { metroCtxRef.current?.close(); } catch(e) {}
+    metroCtxRef.current    = null;
+    isRecordingRef.current = false;
+  };
+
+  const startSession = async () => {
+    setMicError(""); setBlob(null); setBlobUrl(null);
+    isRecordingRef.current = false;
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch(e) { setMicError("Microphone access denied. Please allow mic access and try again."); return; }
+
+    const metroCtx = new (window.AudioContext || window.webkitAudioContext)();
+    metroCtxRef.current  = metroCtx;
+    beatCountRef.current = 0;
+    nextBeatRef.current  = metroCtx.currentTime + 0.1;
+    setPhase("countdown"); setBeat(0); setBar(0); setElapsed(0);
+    runScheduler(bpm, beatsPerBar);
+
+    const countInSecs = countIn * beatsPerBar * (60 / bpm);
+    setTimeout(() => {
+      // Silence the metronome the instant recording starts
+      isRecordingRef.current = true;
+      setPhase("recording");
+      startTimeRef.current = Date.now();
+      const mr = new MediaRecorder(stream, { mimeType: getSupportedMimeType() });
+      chunksRef.current = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.onstop = () => {
+        const b = new Blob(chunksRef.current, { type: getSupportedMimeType() });
+        setBlobUrl(URL.createObjectURL(b)); setBlob(b); setPhase("done");
+        stream.getTracks().forEach(t => t.stop());
+      };
+      mr.start(100); mediaRecRef.current = mr;
+      const tick = () => { setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000)); rafRef.current = requestAnimationFrame(tick); };
+      rafRef.current = requestAnimationFrame(tick);
+    }, countInSecs * 1000);
+  };
+
+  const discard = () => {
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    setBlob(null); setBlobUrl(null); setPhase("idle");
+  };
+
+  const save = () => {
+    if (!blob) return;
+    const ext  = getSupportedMimeType().includes("ogg") ? "ogg" : "webm";
+    const name = `${trackName.trim() || "Recording"}.${ext}`;
+    onSaveRecording(blob, name);
+    discard(); setOpen(false);
+  };
+
+  useEffect(() => () => { stopSession(); if (blobUrl) URL.revokeObjectURL(blobUrl); }, []);
+
+  const COLOR = "#ef4444";
+  const dots  = Array.from({ length: beatsPerBar }, (_, i) => i);
+
+  if (!open) return (
+    <div onClick={() => setOpen(true)}
+      style={{ flex:1, border:"2px dashed #fca5a5", borderRadius:10, padding:16,
+        textAlign:"center", cursor:"pointer", background:"#fafaf8",
+        display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+        gap:4, transition:"all .18s" }}
+      onMouseEnter={e=>e.currentTarget.style.background="#fef2f2"}
+      onMouseLeave={e=>e.currentTarget.style.background="#fafaf8"}>
+      <div style={{fontSize:22, opacity:.6}}>🎙</div>
+      <div style={{fontSize:13, fontWeight:600, color:"#ef4444"}}>Record new track</div>
+      <div style={{fontSize:11, color:"#a8a29e"}}>Use your microphone</div>
+    </div>
+  );
+
+  return (
+    <div style={{ flex:1, border:"1px solid #fca5a580", borderRadius:10,
+      overflow:"hidden", background:"#fafaf8" }}>
+      {/* Header */}
+      <div style={{ padding:"10px 14px", background:"#fef2f2",
+        borderBottom:"1px solid #fca5a540", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <span style={{ fontSize:13, fontWeight:700, color:"#991b1b" }}>🎙 Record New Track</span>
+        <button onClick={() => { stopSession(); discard(); setOpen(false); }}
+          style={{ border:"none", background:"transparent", fontSize:18, cursor:"pointer", color:"#a8a29e" }}>×</button>
+      </div>
+
+      <div style={{ padding:14 }}>
+        {/* Track name */}
+        {phase === "idle" && (
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:11, fontWeight:600, color:"#78716c", marginBottom:5,
+              textTransform:"uppercase", letterSpacing:".08em" }}>Track Name</div>
+            <input
+              value={trackName}
+              onChange={e => setTrackName(e.target.value)}
+              placeholder="e.g. Violin I, Piano, Vocals…"
+              style={{ width:"100%", padding:"8px 10px", border:"1px solid #d6d3d1", borderRadius:8,
+                fontSize:13, fontFamily:"Georgia,serif", outline:"none" }}
+            />
+          </div>
+        )}
+
+        {/* BPM + time sig + count-in */}
+        {phase === "idle" && (
+          <div style={{ display:"flex", gap:10, marginBottom:14, flexWrap:"wrap" }}>
+            <div style={{ flex:"1 1 130px" }}>
+              <div style={{ fontSize:11, fontWeight:600, color:"#78716c", marginBottom:5,
+                textTransform:"uppercase", letterSpacing:".08em" }}>Tempo (BPM)</div>
+              <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                <button onClick={() => setBpm(b => Math.max(40, b-5))}
+                  style={{ width:28,height:28,borderRadius:6,border:"1px solid #d6d3d1",background:"#fff",cursor:"pointer",fontSize:14,fontWeight:700,color:"#44403c" }}>−</button>
+                <div style={{ flex:1, textAlign:"center" }}>
+                  <input type="range" min={40} max={240} value={bpm}
+                    onChange={e => setBpm(Number(e.target.value))}
+                    style={{ width:"100%", accentColor:COLOR }}/>
+                  <div style={{ fontSize:20, fontWeight:700, color:COLOR, fontFamily:"monospace" }}>{bpm}</div>
+                </div>
+                <button onClick={() => setBpm(b => Math.min(240, b+5))}
+                  style={{ width:28,height:28,borderRadius:6,border:"1px solid #d6d3d1",background:"#fff",cursor:"pointer",fontSize:14,fontWeight:700,color:"#44403c" }}>+</button>
+              </div>
+            </div>
+            <div style={{ flex:"0 0 90px" }}>
+              <div style={{ fontSize:11, fontWeight:600, color:"#78716c", marginBottom:5,
+                textTransform:"uppercase", letterSpacing:".08em" }}>Time Sig</div>
+              <select value={beatsPerBar} onChange={e => setBeatsPerBar(Number(e.target.value))}
+                style={{ width:"100%",padding:"7px 8px",border:"1px solid #d6d3d1",borderRadius:8,
+                  fontSize:14,fontFamily:"Georgia,serif",background:"#fff",outline:"none",cursor:"pointer" }}>
+                {[2,3,4,6].map(n => <option key={n} value={n}>{n}/4</option>)}
+              </select>
+            </div>
+            <div style={{ flex:"0 0 90px" }}>
+              <div style={{ fontSize:11, fontWeight:600, color:"#78716c", marginBottom:5,
+                textTransform:"uppercase", letterSpacing:".08em" }}>Count-in</div>
+              <select value={countIn} onChange={e => setCountIn(Number(e.target.value))}
+                style={{ width:"100%",padding:"7px 8px",border:"1px solid #d6d3d1",borderRadius:8,
+                  fontSize:14,fontFamily:"Georgia,serif",background:"#fff",outline:"none",cursor:"pointer" }}>
+                {[0,1,2,4].map(n => <option key={n} value={n}>{n===0?"None":`${n} bar${n>1?"s":""}`}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
+
+        {/* Beat visualiser */}
+        {(phase==="countdown"||phase==="recording") && (
+          <div style={{ marginBottom:14 }}>
+            <div style={{ fontSize:11,color:"#a8a29e",marginBottom:8,fontStyle:"italic" }}>
+              {phase==="countdown"
+                ? `🔊 Count-in: bar ${bar+1} of ${countIn}`
+                : `🔴 Recording "${trackName}" — bar ${bar-countIn+1} · metronome is visual only`}
+            </div>
+            <div style={{ display:"flex", gap:8, justifyContent:"center" }}>
+              {dots.map(i => {
+                const active = i === beat % beatsPerBar;
+                const accent = i === 0;
+                return (
+                  <div key={i} style={{
+                    width:accent?38:30, height:accent?38:30, borderRadius:"50%",
+                    background: active ? (phase==="countdown"?"#f59e0b":COLOR) : (accent?"#e7e5e4":"#f5f5f4"),
+                    border:`2px solid ${active?(phase==="countdown"?"#f59e0b":COLOR):"#e7e5e4"}`,
+                    transition:"background .06s",
+                    boxShadow:active?`0 0 10px ${phase==="countdown"?"#f59e0b":COLOR}80`:"none",
+                    display:"flex",alignItems:"center",justifyContent:"center",
+                    fontSize:12,fontWeight:700,color:active?"#fff":"#a8a29e",
+                  }}>{i+1}</div>
+                );
+              })}
+            </div>
+            {phase==="recording" && (
+              <div style={{ textAlign:"center",marginTop:10,fontSize:24,fontWeight:700,
+                color:COLOR,fontFamily:"monospace",display:"flex",alignItems:"center",
+                justifyContent:"center",gap:8 }}>
+                <span style={{ width:10,height:10,borderRadius:"50%",background:"#ef4444",
+                  display:"inline-block",animation:"pulse 1s ease-in-out infinite" }}/>
+                {formatTime(elapsed)}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Done */}
+        {phase==="done" && blobUrl && (
+          <div style={{ marginBottom:14 }}>
+            <div style={{ fontSize:12,color:"#059669",fontWeight:600,marginBottom:8 }}>
+              ✓ Recording complete — {formatTime(elapsed)}
+            </div>
+            <audio controls src={blobUrl} style={{ width:"100%",marginBottom:10 }}/>
+            <div style={{ display:"flex",gap:8 }}>
+              <button onClick={save} style={{ flex:1,padding:10,borderRadius:8,border:"none",
+                background:COLOR,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer" }}>
+                ✓ Add as "{trackName}"
+              </button>
+              <button onClick={discard} style={{ flex:1,padding:10,borderRadius:8,
+                border:"1px solid #d6d3d1",background:"#fff",color:"#78716c",fontSize:13,cursor:"pointer" }}>
+                ✗ Discard
+              </button>
+            </div>
+          </div>
+        )}
+
+        {micError && (
+          <div style={{ padding:"10px 12px",background:"#fef2f2",borderRadius:8,
+            color:"#ef4444",fontSize:12,marginBottom:12 }}>⚠ {micError}</div>
+        )}
+
+        {phase==="idle" && (
+          <button onClick={startSession} style={{ width:"100%",padding:11,borderRadius:8,
+            border:"none",background:COLOR,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:8 }}>
+            <span>🎙</span>
+            {countIn>0 ? `Start with ${countIn}-bar count-in at ${bpm} BPM` : `Start Recording at ${bpm} BPM`}
+          </button>
+        )}
+        {(phase==="countdown"||phase==="recording") && (
+          <button onClick={stopSession} style={{ width:"100%",padding:11,borderRadius:8,
+            border:"none",background:"#1c1917",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:8 }}>
+            ⏹ Stop
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ───────────────────────────────────────────────────────────────
 export default function App() {
   const [songs,         setSongs]          = useState([]);
@@ -185,7 +733,6 @@ export default function App() {
   const [mutedTracks,   setMutedTracks]    = useState({});
   const [soloTrack,     setSoloTrack]      = useState(null);
   const [trackVolumes,  setTrackVolumes]   = useState({}); // trackId -> 0..100
-  const [expandedControls,setExpandedControls]=useState({}); // trackId -> bool
   const [analysers,     setAnalysers]      = useState({});
   const [decoding,      setDecoding]       = useState(false);
   const [decodeError,   setDecodeError]    = useState("");
@@ -305,7 +852,7 @@ export default function App() {
   const selectSong = (id)=>{
     if (id===activeSongId) return;
     stopAll(); setActiveSongId(id); setMutedTracks({}); setSoloTrack(null);
-    setTrackVolumes({}); setExpandedControls({});
+    setTrackVolumes({});
     setCurrentTime(0); setCurrentMeasure(-1); setDuration(0); setDecodeError("");
   };
 
@@ -397,6 +944,13 @@ export default function App() {
     }
   };
 
+  // Called by TrackRecorder when user hits "Use this recording"
+  // Treats the recorded blob exactly like a file upload
+  const handleSaveRecording = (blob, name) => {
+    const file = new File([blob], name, { type: blob.type });
+    handleTrackUpload([file]);
+  };
+
   // ── Score upload ───────────────────────────────────────────────────────────
   const handleScoreUpload = async (files)=>{
     const file = files.find(isScore)||files[0];
@@ -456,23 +1010,6 @@ export default function App() {
     }
   };
 
-  const wireAndStartTrack=(ctx,track,offset=0)=>{
-    const buf=decodedBufs.current[track.id];
-    if (!buf) return null;
-    const source=ctx.createBufferSource(), analyser=ctx.createAnalyser(), gainNode=ctx.createGain();
-    source.buffer=buf;
-    analyser.fftSize=512;
-    const muted=soloRef.current?soloRef.current!==track.id:!!mutedRef.current[track.id];
-    const vol=(volumeRef.current[track.id]??100)/100;
-    gainNode.gain.value=muted?0:vol;
-    source.connect(analyser);
-    analyser.connect(gainNode);
-    gainNode.connect(ctx.destination);
-    if (offset>0) source.start(0, Math.min(offset, buf.duration-0.05));
-    else source.start(0);
-    return {source, gainNode, analyser};
-  };
-
   const stopAll=useCallback(()=>{
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current=null; }
     Object.values(sourcesRef.current).forEach(({source})=>{ try{source.stop();source.disconnect();}catch(e){} });
@@ -501,10 +1038,13 @@ export default function App() {
     durationRef.current=maxDur; setDuration(maxDur);
     const newAnalysers={},newSources={};
     activeSong.tracks.forEach(t=>{
-      const nodes=wireAndStartTrack(ctx,t);
-      if (!nodes) return;
-      newSources[t.id]=nodes;
-      newAnalysers[t.id]=nodes.analyser;
+      const buf=decodedBufs.current[t.id]; if (!buf) return;
+      const src=ctx.createBufferSource(), an=ctx.createAnalyser(), gn=ctx.createGain();
+      src.buffer=buf; an.fftSize=512;
+      const muted=soloRef.current?soloRef.current!==t.id:!!mutedRef.current[t.id];
+      const vol=(volumeRef.current[t.id]??100)/100;
+      gn.gain.value=muted?0:vol;
+      newAnalysers[t.id]=an;
     });
     sourcesRef.current=newSources; startedAtRef.current=ctx.currentTime;
     setAnalysers(newAnalysers); setIsPlaying(true);
@@ -526,10 +1066,13 @@ export default function App() {
     const offset=ratio*durationRef.current;
     const newAn={},newSrc={};
     activeSong.tracks.forEach(t=>{
-      const nodes=wireAndStartTrack(ctx,t,offset);
-      if (!nodes) return;
-      newSrc[t.id]=nodes;
-      newAn[t.id]=nodes.analyser;
+      const buf=decodedBufs.current[t.id]; if (!buf) return;
+      const src=ctx.createBufferSource(),an=ctx.createAnalyser(),gn=ctx.createGain();
+      src.buffer=buf; an.fftSize=512;
+      const muted=soloRef.current?soloRef.current!==t.id:!!mutedRef.current[t.id];
+      const vol=(volumeRef.current[t.id]??100)/100;
+      gn.gain.value=muted?0:vol;
+      newSrc[t.id]={source:src,gainNode:gn,analyser:an}; newAn[t.id]=an;
     });
     sourcesRef.current=newSrc; startedAtRef.current=ctx.currentTime-offset;
     setAnalysers(newAn); setIsPlaying(true);
@@ -743,24 +1286,31 @@ export default function App() {
                 {activeSong.tracks.length>0&&<span style={{fontSize:11,fontWeight:400,color:"#a8a29e",marginLeft:8}}>{activeSong.tracks.length} loaded</span>}
               </h3>
 
-              <DropArea onFiles={handleTrackUpload}
-                accept="audio/*,.mp3,.wav,.ogg,.flac,.aac,.m4a,.opus" multiple color="#6366f1">
-                <div style={{padding:"8px 0"}}>
-                  <div style={{fontSize:26,marginBottom:5,opacity:.5}}>🎵</div>
-                  <div style={{fontSize:13,fontWeight:600,color:"#44403c",marginBottom:3}}>
-                    {isMobile?"Tap to add instrument audio":"Drop instrument audio files here"}
+              {/* Two ways to add a track */}
+              <div style={{display:"flex",gap:10,marginBottom:10,flexDirection:isMobile?"column":"row"}}>
+                {/* Option 1: Upload */}
+                <DropArea onFiles={handleTrackUpload}
+                  accept="audio/*,.mp3,.wav,.ogg,.flac,.aac,.m4a,.opus" multiple color="#6366f1">
+                  <div style={{padding:"6px 0"}}>
+                    <div style={{fontSize:22,marginBottom:4,opacity:.5}}>📂</div>
+                    <div style={{fontSize:13,fontWeight:600,color:"#44403c",marginBottom:2}}>
+                      {isMobile?"Tap to upload audio":"Drop audio files"}
+                    </div>
+                    <div style={{fontSize:11,color:"#a8a29e"}}>MP3 · WAV · OGG · FLAC · M4A</div>
                   </div>
-                  <div style={{fontSize:11,color:"#78716c",marginBottom:5}}>One file per instrument · uploads to cloud automatically</div>
-                  <div style={{display:"flex",gap:5,justifyContent:"center"}}>
-                    {["🎹","🎻","🎺","🥁","🎸","🎷","🎤"].map(i=><span key={i} style={{fontSize:16}}>{i}</span>)}
-                  </div>
-                  <div style={{fontSize:10,color:"#a8a29e",marginTop:5}}>MP3 · WAV · OGG · FLAC · AAC · M4A</div>
-                </div>
-              </DropArea>
+                </DropArea>
+
+                {/* Option 2: Record new track inline */}
+                <NewTrackRecorder
+                  songId={activeSongId}
+                  trackCount={activeSong.tracks.length}
+                  onSaveRecording={handleSaveRecording}
+                />
+              </div>
 
               {activeSong.tracks.length>0&&(
                 <div style={{fontSize:11,color:"#a8a29e",margin:"7px 0 10px",fontStyle:"italic"}}>
-                  {activeSong.tracks.length} track{activeSong.tracks.length!==1?"s":""} — all play in sync · drop more to add
+                  {activeSong.tracks.length} track{activeSong.tracks.length!==1?"s":""} — all play in sync · add more above
                 </div>
               )}
 
@@ -768,8 +1318,6 @@ export default function App() {
                 const isMuted=soloTrack?soloTrack!==track.id:!!mutedTracks[track.id];
                 const isSolo=soloTrack===track.id;
                 const icon=track.icon||TRACK_ICONS[ti%TRACK_ICONS.length];
-                const vol=trackVolumes[track.id]??100;
-                const controlsOpen=!!expandedControls[track.id];
                 return (
                   <div key={track.id} style={{background:"#fff",
                     border:`1px solid ${!isMuted?track.color+"45":"#e7e5e4"}`,
@@ -797,75 +1345,56 @@ export default function App() {
                         style={{fontSize:18,padding:"0 4px",border:"none",background:"transparent",
                           cursor:"pointer",color:"#d6d3d1",lineHeight:1,flexShrink:0}}>×</button>
                     </div>
-                    <div style={{padding:"8px 14px 0"}}>
+                    <div style={{padding:"8px 14px 6px"}}>
                       <WaveBar analyser={analysers[track.id]} color={track.color} active={!isMuted&&isPlaying}/>
                     </div>
 
-                    <button
-                      type="button"
-                      aria-expanded={controlsOpen}
-                      onClick={()=>setExpandedControls(p=>({...p,[track.id]:!p[track.id]}))}
-                      style={{
-                        width:"100%",padding:"8px 14px",display:"flex",alignItems:"center",gap:8,
-                        border:"none",borderTop:"1px solid #e7e5e4",background:controlsOpen?"#fafaf9":"#fff",
-                        cursor:"pointer",fontSize:12,fontWeight:600,color:"#57534e",textAlign:"left",
-                      }}>
-                      <span style={{
-                        display:"inline-block",fontSize:10,color:"#a8a29e",
-                        transform:controlsOpen?"rotate(90deg)":"rotate(0deg)",transition:"transform .15s",
-                      }}>▶</span>
-                      <span>Track controls</span>
-                      {!controlsOpen&&(
-                        <span style={{marginLeft:"auto",fontSize:11,fontWeight:400,color:"#a8a29e",fontFamily:"monospace"}}>
-                          {vol}% · {isMuted?(isSolo?"solo":"muted"):"on"}
-                        </span>
-                      )}
-                    </button>
-
-                    {controlsOpen&&(
-                      <div style={{padding:"0 14px 12px",borderTop:"1px solid #f5f5f4",background:"#fafaf9"}}>
-                        <div style={{padding:"10px 0 8px",display:"flex",alignItems:"center",gap:10}}>
-                          <span style={{fontSize:13,fontWeight:600,color:"#78716c",flexShrink:0,width:52}}>Volume</span>
-                          <span style={{fontSize:14,flexShrink:0}} title="Volume">
-                            {vol===0?"🔈":vol<50?"🔉":"🔊"}
-                          </span>
-                          <input
-                            type="range" min={0} max={100} step={1}
-                            value={vol}
-                            onChange={e=>changeTrackVolume(track.id, Number(e.target.value))}
-                            style={{
-                              flex:1, height:4, borderRadius:2, outline:"none", cursor:"pointer",
-                              accentColor: track.color,
-                              background:`linear-gradient(to right, ${track.color} ${vol}%, #e7e5e4 ${vol}%)`,
-                            }}
-                          />
-                          <span style={{fontSize:12,fontFamily:"monospace",color:"#78716c",
-                            flexShrink:0,minWidth:32,textAlign:"right"}}>
-                            {vol}%
-                          </span>
-                        </div>
-                        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-                          <button onClick={()=>toggleMute(track.id)} disabled={!!soloTrack}
-                            style={{flex:1,minWidth:80,padding:"9px 12px",borderRadius:8,fontWeight:600,fontSize:13,
-                              cursor:soloTrack?"default":"pointer",
-                              border:`1px solid ${mutedTracks[track.id]?"#ef4444":"#d6d3d1"}`,
-                              background:mutedTracks[track.id]?"#fef2f2":"#fff",
-                              color:mutedTracks[track.id]?"#ef4444":"#78716c",opacity:soloTrack?.35:1}}>
-                            {mutedTracks[track.id]?"🔇 Muted":"🔊 Mute"}
-                          </button>
-                          <button onClick={()=>toggleSolo(track.id)}
-                            style={{flex:1,minWidth:80,padding:"9px 12px",borderRadius:8,fontWeight:600,fontSize:13,cursor:"pointer",
-                              border:`1px solid ${isSolo?track.color:"#d6d3d1"}`,
-                              background:isSolo?track.color:"#fff",color:isSolo?"#fff":"#78716c"}}>
-                            {isSolo?"★ Solo":"☆ Solo"}
-                          </button>
-                        </div>
-                        <div style={{fontSize:10,color:"#b0a9a0",fontStyle:"italic",marginTop:8,
-                          whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
-                          {track.file?.name||track.audioUrl?.split("/").pop()||""}
-                        </div>
+                    {/* Volume slider */}
+                    <div style={{padding:"2px 14px 8px",display:"flex",alignItems:"center",gap:10}}>
+                      <span style={{fontSize:14,flexShrink:0}} title="Volume">
+                        {(trackVolumes[track.id]??100)===0?"🔈":(trackVolumes[track.id]??100)<50?"🔉":"🔊"}
+                      </span>
+                      <input
+                        type="range" min={0} max={100} step={1}
+                        value={trackVolumes[track.id]??100}
+                        onChange={e=>changeTrackVolume(track.id, Number(e.target.value))}
+                        style={{
+                          flex:1, height:4, borderRadius:2, outline:"none", cursor:"pointer",
+                          accentColor: track.color,
+                          background:`linear-gradient(to right, ${track.color} ${trackVolumes[track.id]??100}%, #e7e5e4 ${trackVolumes[track.id]??100}%)`,
+                        }}
+                      />
+                      <span style={{fontSize:12,fontFamily:"monospace",color:"#78716c",
+                        flexShrink:0,minWidth:32,textAlign:"right"}}>
+                        {trackVolumes[track.id]??100}%
+                      </span>
+                    </div>
+                    <div style={{padding:"6px 14px 10px",display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                      <button onClick={()=>toggleMute(track.id)} disabled={!!soloTrack}
+                        style={{flex:1,minWidth:80,padding:"9px 12px",borderRadius:8,fontWeight:600,fontSize:13,
+                          cursor:soloTrack?"default":"pointer",
+                          border:`1px solid ${mutedTracks[track.id]?"#ef4444":"#d6d3d1"}`,
+                          background:mutedTracks[track.id]?"#fef2f2":"#fff",
+                          color:mutedTracks[track.id]?"#ef4444":"#78716c",opacity:soloTrack?.35:1}}>
+                        {mutedTracks[track.id]?"🔇 Muted":"🔊 Mute"}
+                      </button>
+                      <button onClick={()=>toggleSolo(track.id)}
+                        style={{flex:1,minWidth:80,padding:"9px 12px",borderRadius:8,fontWeight:600,fontSize:13,cursor:"pointer",
+                          border:`1px solid ${isSolo?track.color:"#d6d3d1"}`,
+                          background:isSolo?track.color:"#fff",color:isSolo?"#fff":"#78716c"}}>
+                        {isSolo?"★ Solo":"☆ Solo"}
+                      </button>
+                      <TrackRecorder
+                        trackId={track.id}
+                        trackColor={track.color}
+                        trackName={track.name}
+                        onSaveRecording={handleSaveRecording}
+                      />
+                      <div style={{fontSize:10,color:"#b0a9a0",fontStyle:"italic",
+                        flex:isMobile?"1 1 100%":"1",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                        {track.file?.name||track.audioUrl?.split("/").pop()||""}
                       </div>
-                    )}
+                    </div>
                   </div>
                 );
               })}
